@@ -308,3 +308,133 @@ def categorical_wald_test(
         "df_num": m,
         "df_den": df - m + 1,
     }
+
+
+# ---------------------------------------------------------------- 加权 logistic
+
+@dataclass
+class LogitFit:
+    """加权 logistic 的拟合结果。方差用设计校正的三明治估计量。"""
+
+    beta: np.ndarray
+    cov: np.ndarray
+    df: int
+    fitted: np.ndarray          # 各观测的预测概率
+    iterations: int
+    converged: bool
+
+    @property
+    def se(self) -> np.ndarray:
+        return np.sqrt(np.clip(np.diag(self.cov), 0.0, None))
+
+
+class LogitError(ValueError):
+    pass
+
+
+def weighted_logit(
+    y: np.ndarray,
+    X: np.ndarray,
+    design: Design,
+    max_iter: int = 50,
+    tol: float = 1e-9,
+) -> LogitFit:
+    """抽样加权的 logistic 回归。
+
+    点估计是伪极大似然：解加权得分方程 Σ w x (y − p) = 0。
+    直接写 Newton-Raphson 而不借 statsmodels 的 freq_weights —— 那个参数
+    的语义是「这一行代表多少个观测」，用抽样权重去填在数学上恰好给出同一个
+    得分方程，但它据此算出的标准误是错的，容易被人当成对的拿去用。
+
+    方差用设计校正的三明治估计量：
+
+        V(β) = J⁻¹ · V(U) · J⁻¹
+
+    J = X' diag(w p (1−p)) X 是加权信息矩阵（面包），
+    V(U) 是得分贡献 u_i = w_i x_i (y_i − p_i) 的**设计方差**（肉）——
+    正是它把分层与 PSU 的聚类结构算了进去。这与 R 的 svyglm、
+    Stata 的 svy: logit 是同一套。
+    """
+    w = design.weight
+    n, k = X.shape
+    if y.size != n or w.size != n:
+        raise LogitError("y、X、权重的行数对不上")
+
+    beta = np.zeros(k)
+    converged = False
+    iterations = 0
+
+    for iterations in range(1, max_iter + 1):
+        eta = np.clip(X @ beta, -35, 35)          # 防止 exp 溢出
+        p = 1.0 / (1.0 + np.exp(-eta))
+        variance = w * p * (1 - p)
+
+        information = X.T @ (variance[:, None] * X)
+        score = X.T @ (w * (y - p))
+
+        try:
+            step = np.linalg.solve(information, score)
+        except np.linalg.LinAlgError as exc:
+            raise LogitError(
+                "信息矩阵奇异，通常是自变量之间高度共线，或某个自变量把结局完全分开"
+            ) from exc
+
+        beta = beta + step
+        if np.max(np.abs(step)) < tol:
+            converged = True
+            break
+
+    if not converged:
+        raise LogitError(f"迭代 {max_iter} 次仍未收敛，检查是否存在完全分离或共线")
+
+    eta = np.clip(X @ beta, -35, 35)
+    p = 1.0 / (1.0 + np.exp(-eta))
+
+    # 面包：加权信息矩阵的逆
+    information = X.T @ ((w * p * (1 - p))[:, None] * X)
+    try:
+        bread = np.linalg.inv(information)
+    except np.linalg.LinAlgError as exc:
+        raise LogitError("信息矩阵不可逆，无法估计方差") from exc
+
+    # 肉：得分贡献的设计方差 —— 聚类结构在这里被算进去
+    scores = w[:, None] * X * (y - p)[:, None]
+    meat = np.atleast_2d(covariance(scores, design))
+
+    return LogitFit(
+        beta=beta,
+        cov=bread @ meat @ bread,
+        df=design.df,
+        fitted=p,
+        iterations=iterations,
+        converged=True,
+    )
+
+
+def weighted_auc(y: np.ndarray, score: np.ndarray, w: np.ndarray) -> dict[str, Any]:
+    """加权 ROC 与 AUC。
+
+    点估计加了权，AUC 却按样本算，两者口径就不一致了 —— 一个描述人群、
+    一个描述样本，放在同一张结果里没法解释。
+    """
+    order = np.argsort(-score, kind="mergesort")
+    y_sorted, w_sorted = y[order], w[order]
+
+    positives = float((w_sorted * y_sorted).sum())
+    negatives = float((w_sorted * (1 - y_sorted)).sum())
+    if positives == 0 or negatives == 0:
+        return {"auc": None, "fpr": [], "tpr": []}
+
+    tpr = np.concatenate([[0.0], np.cumsum(w_sorted * y_sorted) / positives])
+    fpr = np.concatenate([[0.0], np.cumsum(w_sorted * (1 - y_sorted)) / negatives])
+    auc = float(np.trapezoid(tpr, fpr))
+
+    if tpr.size > 200:
+        idx = np.unique(np.linspace(0, tpr.size - 1, 200).astype(int))
+        tpr, fpr = tpr[idx], fpr[idx]
+
+    return {
+        "auc": auc,
+        "fpr": [round(float(x), 5) for x in fpr],
+        "tpr": [round(float(x), 5) for x in tpr],
+    }

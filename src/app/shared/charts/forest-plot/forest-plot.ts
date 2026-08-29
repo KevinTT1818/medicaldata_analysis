@@ -39,6 +39,19 @@ export class ForestPlot {
   });
 
   readonly hasPh = computed(() => this.result().ph_test.length > 0);
+
+  /** 加权拟合时把设计参数亮出来 —— 自由度决定了置信区间有多宽。 */
+  readonly designNote = computed(() => {
+    const r = this.result();
+    if (!r.weighted) return null;
+    if (!r.design || r.design.approximate) {
+      return '只有抽样权重、没有分层与初级抽样单元，方差按有放回抽样近似，会偏小';
+    }
+    return (
+      `置信区间来自设计校正的三明治方差 · ${r.design.n_strata} 层 · ` +
+      `${r.design.n_psu} 个 PSU · 自由度 ${r.design.df}`
+    );
+  });
   readonly hasRoc = computed(() => !!this.result().roc?.fpr.length);
 
   readonly chartHeight = computed(() => `${Math.max(200, this.rows().length * 40 + 84)}px`);

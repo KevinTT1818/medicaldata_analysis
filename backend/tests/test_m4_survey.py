@@ -570,3 +570,174 @@ class NhanesStandardErrorTest(Base):
         srs_se = float(np.sqrt(est.value * (1 - est.value) / n))
         self.assertGreater(est.se, srs_se * 2)
         self.assertGreater(est.deff, 3.0)
+
+
+class SurveyLogitTest(unittest.TestCase):
+    """加权 logistic 的伪极大似然与三明治方差。"""
+
+    @staticmethod
+    def _sample(n=500, seed=7):
+        import numpy as np
+        rng = np.random.default_rng(seed)
+        X = np.column_stack([np.ones(n), rng.normal(0, 1, n), rng.normal(0, 1, n)])
+        eta = X @ np.array([-0.5, 1.2, -0.8])
+        y = (rng.random(n) < 1 / (1 + np.exp(-eta))).astype(float)
+        return y, X
+
+    def test_point_estimates_match_statsmodels_when_unweighted(self):
+        """等权时伪极大似然就是普通极大似然，系数必须一致到机器精度。"""
+        import numpy as np
+        import statsmodels.api as sm
+        from app.analyses import survey
+
+        y, X = self._sample()
+        fit = survey.weighted_logit(y, X, survey.build_design(np.ones(y.size), None, None))
+        reference = sm.Logit(y, X).fit(disp=0)
+        for i in range(X.shape[1]):
+            self.assertAlmostEqual(fit.beta[i], reference.params[i], places=10)
+        self.assertTrue(fit.converged)
+
+    def test_sandwich_se_close_to_model_se_without_clustering(self):
+        """无聚类时三明治是稳健估计量，与模型 SE 应当接近但不必相同。"""
+        import numpy as np
+        import statsmodels.api as sm
+        from app.analyses import survey
+
+        y, X = self._sample()
+        fit = survey.weighted_logit(y, X, survey.build_design(np.ones(y.size), None, None))
+        reference = sm.Logit(y, X).fit(disp=0)
+        for i in range(X.shape[1]):
+            self.assertAlmostEqual(fit.se[i] / reference.bse[i], 1.0, delta=0.15)
+
+    def test_clustering_inflates_se_but_not_estimates(self):
+        """簇内相关抬高的是方差，不是系数 —— 忽略它就会高估显著性。
+
+        构造方式：自变量是个体级的，但结局上叠一个 PSU 层面的共同冲击。
+        这是最典型的情形（同一社区的人共享未观测的环境因素）。
+        簇级冲击结构上作用在截距，所以截距的方差膨胀是稳健的（这里 2 倍以上）；
+        个体级协变量的斜率受影响小得多，且随样本随机性有正有负 ——
+        所以这里只断言截距，不对斜率下结论。
+        """
+        import numpy as np
+        from app.analyses import survey
+
+        rng = np.random.default_rng(11)
+        n, n_psu = 600, 30
+        per_psu = n // n_psu
+        psu = np.repeat(np.arange(n_psu), per_psu)
+
+        x = rng.normal(0, 1, n)
+        shock = np.repeat(rng.normal(0, 1.5, n_psu), per_psu)
+        eta = -0.3 + 0.8 * x + shock
+        y = (rng.random(n) < 1 / (1 + np.exp(-eta))).astype(float)
+        X = np.column_stack([np.ones(n), x])
+        w = np.ones(n)
+
+        clustered = survey.weighted_logit(
+            y, X, survey.build_design(w, np.zeros(n), psu))
+        independent = survey.weighted_logit(
+            y, X, survey.build_design(w, None, None))
+
+        # 点估计只取决于权重，与聚类结构无关
+        for i in range(2):
+            self.assertAlmostEqual(clustered.beta[i], independent.beta[i], places=12)
+
+        self.assertGreater(clustered.se[0], independent.se[0] * 2.0)
+
+    def test_weights_change_the_point_estimate(self):
+        """加权不只影响区间，点估计本身就会变。"""
+        import numpy as np
+        from app.analyses import survey
+
+        rng = np.random.default_rng(13)
+        n = 400
+        x = rng.normal(0, 1, n)
+        y = (rng.random(n) < 1 / (1 + np.exp(-(0.5 * x)))).astype(float)
+        X = np.column_stack([np.ones(n), x])
+        # 让 x 大的人权重高 -> 加权后的人群里 x 的分布不同
+        w = np.exp(x)
+
+        equal = survey.weighted_logit(y, X, survey.build_design(np.ones(n), None, None))
+        skewed = survey.weighted_logit(y, X, survey.build_design(w, None, None))
+        self.assertNotAlmostEqual(equal.beta[1], skewed.beta[1], places=3)
+
+    def test_singular_information_matrix_is_reported(self):
+        import numpy as np
+        from app.analyses import survey
+
+        n = 100
+        x = np.linspace(-1, 1, n)
+        X = np.column_stack([np.ones(n), x, x])   # 完全共线
+        y = (x > 0).astype(float)
+        with self.assertRaises(survey.LogitError):
+            survey.weighted_logit(y, X, survey.build_design(np.ones(n), None, None))
+
+    def test_weighted_auc_degenerates_to_unweighted(self):
+        import numpy as np
+        from app.analyses import regression, survey
+
+        rng = np.random.default_rng(17)
+        n = 300
+        y = (rng.random(n) < 0.4).astype(float)
+        score = rng.random(n) + y * 0.3
+        weighted = survey.weighted_auc(y, score, np.ones(n))
+        plain = regression._roc(y, score)
+        self.assertAlmostEqual(weighted["auc"], plain["auc"], places=10)
+
+    def test_weighted_auc_responds_to_weights(self):
+        import numpy as np
+        from app.analyses import survey
+
+        rng = np.random.default_rng(19)
+        n = 300
+        y = (rng.random(n) < 0.5).astype(float)
+        score = rng.random(n)
+        equal = survey.weighted_auc(y, score, np.ones(n))
+        skewed = survey.weighted_auc(y, score, 1 + 9 * score)
+        self.assertNotAlmostEqual(equal["auc"], skewed["auc"], places=3)
+
+
+class NhanesLogitTest(Base):
+    def _run(self, dataset=NH, **params):
+        analysis = registry.get("regression.logistic")
+        parsed = analysis.Params(**params)
+        frame = builder.build_feature_frame(dataset, analysis.required_variables(parsed))
+        return analysis.run(AnalysisContext(dataset, frame, self.catalog[dataset], parsed))
+
+    def test_weighted_path_reports_design(self):
+        out = self._run(outcome="measurement.NHANES:hypertension",
+                        covariates=[AGE, BMI, SEX]).payload
+        self.assertTrue(out["weighted"])
+        self.assertEqual(out["design"]["df"], 15)
+        self.assertEqual(out["design"]["n_strata"], 15)
+        self.assertFalse(out["design"]["approximate"])
+        self.assertTrue(any("三明治方差" in n for n in out["notes"]))
+
+    def test_pseudo_r2_omitted_when_weighted(self):
+        """伪 R² 在加权拟合下没有对应的标准定义，不给数字比给个错的强。"""
+        out = self._run(outcome="measurement.NHANES:hypertension",
+                        covariates=[AGE, BMI]).payload
+        self.assertIsNone(out["pseudo_r2"])
+
+    def test_plain_dataset_keeps_model_based_path(self):
+        out = self._run(dataset=HF, outcome="outcome.death",
+                        covariates=["person.age_at_index"]).payload
+        self.assertFalse(out["weighted"])
+        self.assertIsNone(out["design"])
+        self.assertIsNotNone(out["pseudo_r2"])
+
+    def test_no_unweighted_warning_when_design_is_applied(self):
+        """既然做了设计校正，就不该再提示「未做加权」。"""
+        result = self._run(outcome="measurement.NHANES:hypertension", covariates=[AGE])
+        self.assertFalse(any("未做加权" in w for w in result.warnings))
+
+    def test_effect_directions_are_clinically_sensible(self):
+        out = self._run(outcome="measurement.NHANES:hypertension",
+                        covariates=[AGE, BMI]).payload
+        by_variable = {r["variable"]: r for r in out["rows"]}
+        # 年龄与 BMI 都是高血压的危险因素
+        self.assertGreater(by_variable[AGE]["estimate"], 1.0)
+        self.assertGreater(by_variable[BMI]["estimate"], 1.0)
+        for row in out["rows"]:
+            self.assertLess(row["ci_lower"], row["estimate"])
+            self.assertGreater(row["ci_upper"], row["estimate"])

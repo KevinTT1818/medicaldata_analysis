@@ -197,7 +197,16 @@ export interface ForestResult {
   rows: ForestRow[];
   ph_test: { label: string; p: number }[];
   roc?: RocData;
-  pseudo_r2?: number;
+  /** 是否按抽样权重估计。为 true 时置信区间来自设计校正的三明治方差。 */
+  weighted?: boolean;
+  design?: {
+    n_strata: number;
+    n_psu: number;
+    df: number;
+    approximate: boolean;
+  } | null;
+  /** 加权拟合下伪 R² 没有标准定义，此时为 null。 */
+  pseudo_r2?: number | null;
   concordance?: number;
   n_used: number;
   n_events: number;

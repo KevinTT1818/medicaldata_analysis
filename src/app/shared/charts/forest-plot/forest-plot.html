@@ -1,3 +1,9 @@
+@if (designNote(); as note) {
+  <p class="survey-note" [class.is-warn]="!result().design || result().design!.approximate">
+    <span class="badge">已加权</span>{{ note }}
+  </p>
+}
+
 <div class="layout">
   <app-echart [option]="option()" [ariaLabel]="ariaLabel()" [height]="chartHeight()" />
 
@@ -53,7 +59,7 @@
   @if (result().concordance !== undefined) {
     <div><dt>C-index</dt><dd>{{ result().concordance!.toFixed(3) }}</dd></div>
   }
-  @if (result().pseudo_r2 !== undefined) {
+  @if (result().pseudo_r2 !== undefined && result().pseudo_r2 !== null) {
     <div><dt>伪 R²</dt><dd>{{ result().pseudo_r2!.toFixed(3) }}</dd></div>
   }
   @if (result().roc?.auc) {
