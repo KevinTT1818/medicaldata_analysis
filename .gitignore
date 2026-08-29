@@ -46,3 +46,9 @@ __screenshots__/
 .DS_Store
 Thumbs.db
 >>>>>>> Stashed changes
+
+# 后端
+/backend/.venv/
+/backend/data/
+__pycache__/
+*.pyc

@@ -1,0 +1,7 @@
+fastapi>=0.141
+uvicorn[standard]>=0.52
+duckdb>=1.5
+polars>=1.44
+pyarrow>=25.0
+scipy>=1.18
+pydantic>=2.13

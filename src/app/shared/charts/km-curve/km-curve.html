@@ -1,0 +1,67 @@
+<app-echart [option]="option()" [ariaLabel]="ariaLabel()" height="360px" />
+
+<div class="summary">
+  <div class="scroller">
+    <table>
+      <caption class="sr-only">各组样本量、事件数与中位生存时间</caption>
+      <thead>
+        <tr>
+          <th scope="col">分组</th>
+          <th scope="col" class="num">n</th>
+          <th scope="col" class="num">事件</th>
+          <th scope="col" class="num">删失</th>
+          <th scope="col" class="num">中位生存</th>
+        </tr>
+      </thead>
+      <tbody>
+        @for (s of summary(); track s.name) {
+          <tr>
+            <th scope="row">
+              <span class="swatch" [style.background]="s.color" aria-hidden="true"></span>{{ s.name }}
+            </th>
+            <td class="num">{{ s.n }}</td>
+            <td class="num">{{ s.events }}</td>
+            <td class="num">{{ s.censored }}</td>
+            <td class="num">{{ s.medianText }}</td>
+          </tr>
+        }
+      </tbody>
+    </table>
+  </div>
+
+  @if (logrankText(); as p) {
+    <p class="logrank">
+      {{ result().test }}<span class="p-value">p = {{ p }}</span>
+    </p>
+  }
+</div>
+
+<div class="at-risk">
+  <h4>各时点尚在随访人数（at risk）</h4>
+  <div class="scroller">
+    <table>
+      <caption class="sr-only">各时点仍在随访的人数，用于判断曲线尾部是否可信</caption>
+      <thead>
+        <tr>
+          <th scope="col">分组</th>
+          @for (time of result().at_risk.times; track time) {
+            <th scope="col" class="num">{{ time }}</th>
+          }
+        </tr>
+      </thead>
+      <tbody>
+        @for (row of result().at_risk.rows; track row.name) {
+          <tr>
+            <th scope="row">{{ row.name }}</th>
+            @for (count of row.counts; track $index) {
+              <td class="num" [class.thin]="count < 10">{{ count }}</td>
+            }
+          </tr>
+        }
+      </tbody>
+    </table>
+  </div>
+  <p class="note">
+    人数少于 10 的时点已标黄——曲线在这一段的估计很不稳定，解读时要谨慎。
+  </p>
+</div>

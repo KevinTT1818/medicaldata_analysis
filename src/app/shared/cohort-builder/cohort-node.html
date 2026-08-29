@@ -1,0 +1,135 @@
+@if (isGroup()) {
+  <div class="group" [class.is-nested]="depth() > 0">
+    <div class="group-head">
+      <select
+        class="joiner"
+        [attr.aria-label]="'组合方式'"
+        [value]="asGroup().op"
+        (change)="onGroupOpChange($any($event.target).value)"
+      >
+        <option value="and">全部满足（且）</option>
+        <option value="or">任一满足（或）</option>
+      </select>
+
+      <div class="group-actions">
+        <button class="btn btn-ghost sm" type="button" (click)="addCondition()">＋ 条件</button>
+        <button class="btn btn-ghost sm" type="button" (click)="addGroup()">＋ 子分组</button>
+        @if (removable()) {
+          <button class="btn btn-ghost sm danger" type="button" (click)="removed.emit()" aria-label="删除分组">×</button>
+        }
+      </div>
+    </div>
+
+    @if (asGroup().children.length) {
+      <ul class="children">
+        @for (child of asGroup().children; track $index) {
+          <li>
+            <app-cohort-node
+              [node]="child"
+              [variables]="variables()"
+              [operators]="operators()"
+              [depth]="depth() + 1"
+              (changed)="replaceChild($index, $event)"
+              (removed)="removeChild($index)"
+            />
+          </li>
+        }
+      </ul>
+    } @else {
+      <p class="empty">还没有条件。点「＋ 条件」开始，不加任何条件即为全量人群。</p>
+    }
+  </div>
+} @else {
+  <div class="condition">
+    <select
+      class="var"
+      aria-label="变量"
+      [value]="asCondition().variable"
+      (change)="onVariableChange($any($event.target).value)"
+    >
+      @for (v of variables(); track v.id) {
+        <option [value]="v.id">{{ v.label }}</option>
+      }
+    </select>
+
+    <select
+      class="op"
+      aria-label="运算符"
+      [value]="asCondition().op"
+      (change)="onOpChange($any($event.target).value)"
+    >
+      @for (op of availableOps(); track op) {
+        <option [value]="op">{{ symbol(op) }}</option>
+      }
+    </select>
+
+    @switch (valueMode()) {
+      @case ('range') {
+        <span class="range">
+          <input
+            type="number" aria-label="下界" class="num"
+            [value]="rangeValue()[0]"
+            (change)="onRangeChange(0, $any($event.target).value)"
+          />
+          <span class="dash" aria-hidden="true">–</span>
+          <input
+            type="number" aria-label="上界" class="num"
+            [value]="rangeValue()[1]"
+            (change)="onRangeChange(1, $any($event.target).value)"
+          />
+        </span>
+      }
+      @case ('list') {
+        <span class="levels">
+          @for (level of levels(); track level) {
+            <label class="chip" [class.is-on]="isLevelSelected(level)">
+              <input
+                type="checkbox"
+                [checked]="isLevelSelected(level)"
+                (change)="toggleLevel(level)"
+              />
+              {{ level }}
+            </label>
+          } @empty {
+            <span class="no-levels">该变量没有可选水平</span>
+          }
+        </span>
+      }
+      @case ('number') {
+        <input
+          type="number" aria-label="取值" class="num"
+          [value]="scalarValue()"
+          (change)="onScalarChange($any($event.target).value)"
+        />
+      }
+      @case ('level') {
+        <select
+          class="level" aria-label="取值"
+          [value]="scalarValue()"
+          (change)="onScalarChange($any($event.target).value)"
+        >
+          <option value="" disabled>选一个</option>
+          @for (level of levels(); track level) {
+            <option [value]="level">{{ level }}</option>
+          }
+        </select>
+      }
+      @default {
+        <span class="no-value">（无需取值）</span>
+      }
+    }
+
+    @if (variable(); as v) {
+      @if (v.unit) {
+        <span class="unit">{{ v.unit }}</span>
+      }
+      @if (v.n_missing > 0) {
+        <span class="miss" title="该变量有缺失值。缺失的记录不会满足除「缺失」外的任何条件。">
+          缺 {{ v.n_missing }}
+        </span>
+      }
+    }
+
+    <button class="btn btn-ghost sm danger remove" type="button" (click)="removed.emit()" aria-label="删除条件">×</button>
+  </div>
+}

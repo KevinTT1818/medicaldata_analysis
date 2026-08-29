@@ -1,0 +1,174 @@
+<header class="page-head">
+  <h1>分析工作台</h1>
+  <p>选数据集 → 选算子 → 配参数 → 运行。参数表单由后端算子的 JSON Schema 驱动。</p>
+</header>
+
+<section class="panel config" aria-label="分析配置">
+  <div class="field">
+    <label for="ds">数据集</label>
+    <select id="ds" [value]="datasetId() ?? ''" (change)="onDatasetChange($any($event.target).value)">
+      @for (d of datasets.value(); track d.id) {
+        <option [value]="d.id" [disabled]="!d.imported">
+          {{ d.label }}{{ d.imported ? '' : '（未导入）' }}
+        </option>
+      }
+    </select>
+  </div>
+
+  <div class="field">
+    <label for="an">分析算子</label>
+    <select id="an" [value]="analysisId() ?? ''" (change)="onAnalysisChange($any($event.target).value)">
+      @for (a of registry.value(); track a.id) {
+        <option [value]="a.id">{{ a.label }}</option>
+      }
+    </select>
+  </div>
+
+  <div class="field">
+    <label for="co">队列</label>
+    <select id="co" [value]="cohortId() ?? ''" (change)="onCohortChange($any($event.target).value)">
+      <option value="">全量人群（不筛选）</option>
+      @for (c of cohorts.value(); track c.id) {
+        <option [value]="c.id">{{ c.name }}</option>
+      }
+    </select>
+  </div>
+
+  @if (hasRepeatedMeasures()) {
+    <div class="field">
+      <label for="agg">重复测量取值</label>
+      <select id="agg" [value]="measurementAgg()" (change)="onAggChange($any($event.target).value)">
+        @for (opt of aggOptions; track opt[0]) {
+          <option [value]="opt[0]">{{ opt[1] }}</option>
+        }
+      </select>
+    </div>
+  }
+
+  <button class="btn run" type="button" [disabled]="!canRun()" (click)="run()">
+    @if (running()) {
+      {{ job()?.stage ?? '运行中' }}…
+    } @else {
+      运行分析
+    }
+  </button>
+</section>
+
+@if (currentAnalysis(); as a) {
+  <p class="analysis-desc">{{ a.description }}</p>
+}
+
+<div class="layout">
+  <aside class="panel params" aria-label="分析参数">
+    @if (schema.isLoading()) {
+      <p class="hint" role="status">正在读取变量目录…</p>
+    } @else if (schema.error()) {
+      <p class="alert alert-error" role="alert">
+        该数据集尚未导入，先去「数据集」页导入。
+      </p>
+    } @else if (currentAnalysis(); as a) {
+      @if (hiddenVariables() > 0) {
+        <p class="hidden-note">
+          另有 {{ hiddenVariables() }} 个变量因覆盖人数过少未列出。
+        </p>
+      }
+      <app-schema-form
+        [schema]="a.params_schema"
+        [variables]="variables()"
+        (changed)="onParamsChanged($event)"
+      />
+    }
+  </aside>
+
+  <section class="results" aria-label="分析结果" aria-live="polite">
+    @if (errorText(); as err) {
+      <p class="alert alert-error" role="alert">{{ err }}</p>
+    }
+
+    @for (w of warnings(); track w) {
+      <p class="alert alert-warn">{{ w }}</p>
+    }
+
+    @if (result()) {
+      <div class="panel result-panel">
+        <div class="result-head">
+          <h2>{{ resultTitle() }}</h2>
+          <span class="head-meta">
+            <button
+              class="btn btn-ghost sm add-report"
+              type="button"
+              [disabled]="alreadyInReport()"
+              (click)="addToReport()"
+            >
+              {{ alreadyInReport() ? '已加入报告' : '加入报告' }}
+              @if (reportDraft.count() > 0) {
+                <span class="draft-count">{{ reportDraft.count() }}</span>
+              }
+            </button>
+            @if (job()?.cohort_n !== null && job()?.cohort_n !== undefined) {
+              <span class="cohort-badge" [class.is-filtered]="!!currentCohort()">
+                @if (currentCohort(); as c) {
+                  {{ c.name }} · {{ job()!.cohort_n }} / {{ job()!.cohort_total }} 例
+                } @else {
+                  全量 {{ job()!.cohort_n }} 例
+                }
+              </span>
+            }
+            @if (fingerprint(); as fp) {
+              <span class="fingerprint mono" title="队列定义 + 参数 + 数据集版本的指纹，用于复现">
+                指纹 {{ fp }}
+              </span>
+            }
+          </span>
+        </div>
+
+        @if (baselineResult(); as table) {
+          <app-baseline-table [result]="table" />
+        } @else if (kmResult(); as km) {
+          <app-km-curve [result]="km" />
+        } @else if (forestResult(); as forest) {
+          <app-forest-plot [result]="forest" />
+        } @else if (distributionResult(); as dist) {
+          <app-distribution-panel [result]="dist" />
+        } @else if (missingnessResult(); as miss) {
+          <p class="miss-summary">
+            完整记录 <strong>{{ miss.complete_cases }}</strong> / {{ miss.overall_n }}
+            （{{ miss.complete_pct }}%）
+          </p>
+          <div class="scroller">
+            <table class="miss-table">
+              <thead>
+                <tr>
+                  <th scope="col">变量</th>
+                  <th scope="col" class="num">缺失数</th>
+                  <th scope="col" class="num">缺失率</th>
+                  <th scope="col">分布</th>
+                </tr>
+              </thead>
+              <tbody>
+                @for (r of miss.rows; track r.variable) {
+                  <tr>
+                    <th scope="row">{{ r.label }}</th>
+                    <td class="num">{{ r.n_missing }}</td>
+                    <td class="num">{{ r.pct_missing }}%</td>
+                    <td class="bar-cell">
+                      <span class="bar" [style.width.%]="r.pct_missing"></span>
+                    </td>
+                  </tr>
+                }
+              </tbody>
+            </table>
+          </div>
+        }
+      </div>
+    } @else if (!running()) {
+      <div class="panel empty">
+        <p>在左侧配好参数后点「运行分析」。</p>
+        <p class="hint">
+          想看生存曲线：数据集选「UCI Heart Failure」，算子选「Kaplan-Meier 生存曲线」，
+          结局选「结局：death」，分组选「高血压」。
+        </p>
+      </div>
+    }
+  </section>
+</div>

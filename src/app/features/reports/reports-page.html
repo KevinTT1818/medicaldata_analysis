@@ -1,0 +1,163 @@
+<header class="page-head no-print">
+  <h1>报告</h1>
+  <p>
+    把工作台的分析结果组装成一份报告。存的是分析的定义而不是算出来的数字，
+    所以随时能重跑，并与保存时的基线逐节核对。
+  </p>
+</header>
+
+@if (saved.value().length) {
+  <section class="panel saved-strip no-print" aria-label="已保存的报告">
+    <span class="strip-label">已保存</span>
+    <ul>
+      @for (r of saved.value(); track r.id) {
+        <li [class.is-editing]="draft.editingId() === r.id">
+          <button class="load" type="button" (click)="load(r)">
+            {{ r.title }}<span class="n">{{ r.sections.length }} 节</span>
+          </button>
+          <button class="act" type="button" (click)="runReport(r.id)" [disabled]="busy()">重跑</button>
+          <button class="act danger" type="button" (click)="remove(r)" [disabled]="busy()"
+                  [attr.aria-label]="'删除报告 ' + r.title">×</button>
+        </li>
+      }
+    </ul>
+    <button class="btn btn-ghost sm" type="button" (click)="newReport()">新建</button>
+  </section>
+}
+
+@if (errorText(); as err) {
+  <p class="alert alert-error no-print" role="alert">{{ err }}</p>
+}
+
+<div class="layout">
+  <aside class="panel editor no-print" aria-label="报告编辑">
+    <h2>{{ draft.editingId() ? '编辑报告' : '新报告' }}</h2>
+
+    <div class="field">
+      <label for="rtitle">标题</label>
+      <input id="rtitle" type="text" maxlength="160" placeholder="例如：心衰队列基线与生存分析"
+             [value]="draft.title()" (input)="draft.setTitle($any($event.target).value)" />
+    </div>
+    <div class="field">
+      <label for="rdesc">说明（可选）</label>
+      <input id="rdesc" type="text" placeholder="研究问题与数据来源"
+             [value]="draft.description()" (input)="draft.setDescription($any($event.target).value)" />
+    </div>
+
+    <h3>小节<span class="count">{{ draft.count() }}</span></h3>
+    @if (draft.count() === 0) {
+      <p class="hint">
+        还没有小节。去<a routerLink="/workbench">分析工作台</a>跑一个分析，
+        结果右上角有「加入报告」。
+      </p>
+    } @else {
+      <ol class="sections">
+        @for (s of draft.sections(); track $index) {
+          <li>
+            <input class="sec-title" type="text" [value]="s.title"
+                   [attr.aria-label]="'第 ' + ($index + 1) + ' 节标题'"
+                   (change)="draft.updateSection($index, { title: $any($event.target).value })" />
+            <div class="sec-meta">
+              <span class="mono">{{ s.dataset }}</span>
+              <span class="mono">{{ s.analysis }}</span>
+              @if (s.cohort_id) { <span class="tag">队列</span> }
+            </div>
+            <textarea class="sec-note" rows="2" placeholder="这一节的解读（可选）"
+                      [attr.aria-label]="'第 ' + ($index + 1) + ' 节说明'"
+                      (change)="draft.updateSection($index, { note: $any($event.target).value || null })"
+            >{{ s.note }}</textarea>
+            <div class="sec-actions">
+              <button type="button" (click)="draft.move($index, -1)" [disabled]="$first" aria-label="上移">↑</button>
+              <button type="button" (click)="draft.move($index, 1)" [disabled]="$last" aria-label="下移">↓</button>
+              <button type="button" class="danger" (click)="draft.removeAt($index)" aria-label="移除本节">移除</button>
+            </div>
+          </li>
+        }
+      </ol>
+    }
+
+    <div class="editor-actions">
+      <button class="btn" type="button" [disabled]="!canSave()" (click)="save()">
+        {{ busy() ? busyLabel() + '…' : (draft.editingId() ? '更新并重设基线' : '保存并建立基线') }}
+      </button>
+    </div>
+  </aside>
+
+  <section class="rendered" aria-label="报告内容" aria-live="polite">
+    @if (run(); as r) {
+      <div class="panel report-doc">
+        <header class="doc-head">
+          <div>
+            <h2>{{ r.report.title }}</h2>
+            @if (r.report.description) {
+              <p class="doc-desc">{{ r.report.description }}</p>
+            }
+            <p class="doc-meta mono">
+              保存于 {{ r.report.created_at.slice(0, 19) }} · 更新于 {{ r.report.updated_at.slice(0, 19) }}
+            </p>
+          </div>
+          <div class="doc-actions no-print">
+            <button class="btn btn-ghost sm" type="button" (click)="print()">导出 / 打印</button>
+            @if (reproSummary(); as sum) {
+              @if (sum.changed > 0) {
+                <button class="btn btn-ghost sm" type="button"
+                        (click)="rebaseline(r.report.id)" [disabled]="busy()">
+                  重设基线
+                </button>
+              }
+            }
+          </div>
+        </header>
+
+        @if (reproSummary(); as sum) {
+          <p class="repro" [class.is-ok]="sum.reproducible" [class.is-bad]="!sum.reproducible">
+            <span class="badge">{{ sum.reproducible ? '可复现' : '有变化' }}</span>
+            共 {{ sum.total }} 节：{{ sum.match }} 节与基线一致@if (sum.changed) {，<strong>{{ sum.changed }} 节数字有变</strong>}@if (sum.failed) {，{{ sum.failed }} 节跑不通}@if (sum.no_baseline) {，{{ sum.no_baseline }} 节无基线}。
+          </p>
+        }
+
+        @for (sec of r.sections; track $index) {
+          <article class="section">
+            <h3><span class="num">{{ $index + 1 }}</span>{{ sec.title }}</h3>
+
+            @if (comparisonFor($index); as cmp) {
+              <p class="verdict" [attr.data-verdict]="cmp.verdict">
+                <span class="v-label">{{ verdictLabel[cmp.verdict] }}</span>{{ cmp.detail }}
+              </p>
+            }
+
+            @if (sec.status === 'failed') {
+              <p class="alert alert-error">{{ sec.error }}</p>
+            } @else {
+              @if (asBaseline(sec.result); as t) { <app-baseline-table [result]="t" /> }
+              @else if (asKm(sec.result); as t) { <app-km-curve [result]="t" /> }
+              @else if (asForest(sec.result); as t) { <app-forest-plot [result]="t" /> }
+              @else if (asDistribution(sec.result); as t) { <app-distribution-panel [result]="t" /> }
+              @else if (asMissingness(sec.result); as t) {
+                <p class="miss">完整记录 {{ t.complete_cases }} / {{ t.overall_n }}（{{ t.complete_pct }}%）</p>
+              }
+            }
+
+            @if (sec.note) {
+              <p class="note">{{ sec.note }}</p>
+            }
+
+            <p class="fingerprint mono">
+              指纹 {{ sec.job.spec.fingerprint }}
+              @if (sec.job.cohort_n !== null) {
+                · {{ sec.job.cohort_n }} / {{ sec.job.cohort_total }} 例
+              }
+            </p>
+          </article>
+        }
+      </div>
+    } @else if (!busy()) {
+      <div class="panel empty no-print">
+        <p>保存报告后会自动跑一遍并显示在这里。</p>
+        <p class="hint">已保存的报告可以点上方的「重跑」随时核对数字有没有变。</p>
+      </div>
+    } @else {
+      <p class="hint no-print" role="status">{{ busyLabel() }}…</p>
+    }
+  </section>
+</div>

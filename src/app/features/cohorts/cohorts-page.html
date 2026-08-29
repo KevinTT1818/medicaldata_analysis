@@ -1,0 +1,106 @@
+<header class="page-head">
+  <h1>队列构建器</h1>
+  <p>用可视化条件筛出研究人群，不写 SQL。保存后可在分析工作台直接引用。</p>
+</header>
+
+<section class="panel config" aria-label="数据集选择">
+  <div class="field">
+    <label for="ds">数据集</label>
+    <select id="ds" [value]="datasetId() ?? ''" (change)="onDatasetChange($any($event.target).value)">
+      @for (d of datasets.value(); track d.id) {
+        <option [value]="d.id" [disabled]="!d.imported">
+          {{ d.label }}{{ d.imported ? '' : '（未导入）' }}
+        </option>
+      }
+    </select>
+  </div>
+
+  @if (saved.value().length) {
+    <div class="field grow">
+      <label id="saved-label">已保存的队列</label>
+      <ul class="saved-list" aria-labelledby="saved-label">
+        @for (c of saved.value(); track c.id) {
+          <li [class.is-editing]="editingId() === c.id">
+            <button class="load" type="button" (click)="load(c)" [title]="c.description ?? ''">
+              {{ c.name }}
+            </button>
+            <button class="del" type="button" (click)="remove(c)" [attr.aria-label]="'删除队列 ' + c.name">×</button>
+          </li>
+        }
+      </ul>
+    </div>
+  }
+</section>
+
+<div class="layout">
+  <section class="builder" aria-label="筛选条件">
+    <div class="builder-head">
+      <h2>筛选条件<span class="count">{{ conditionCount() }} 条</span></h2>
+      <button class="btn btn-ghost sm" type="button" (click)="resetForm()">清空重来</button>
+    </div>
+
+    @if (schema.isLoading() || operators.isLoading()) {
+      <p class="hint" role="status">正在读取变量目录…</p>
+    } @else if (schema.error()) {
+      <p class="alert alert-error" role="alert">该数据集尚未导入，先去「数据集」页导入。</p>
+    } @else if (operators.hasValue() && variables().length) {
+      <app-cohort-node
+        [node]="definition()"
+        [variables]="variables()"
+        [operators]="operators.value()!"
+        [removable]="false"
+        (changed)="onDefinitionChange($event)"
+      />
+
+      @if (!complete()) {
+        <p class="alert alert-warn">有条件还没填完取值，预览暂停。</p>
+      }
+    }
+
+    <div class="panel save-box">
+      <h3>{{ editingId() ? '更新队列' : '保存为队列' }}</h3>
+      <div class="save-fields">
+        <div class="field">
+          <label for="cname">名称</label>
+          <input
+            id="cname" type="text" maxlength="80" placeholder="例如：中老年糖尿病心衰"
+            [value]="name()" (input)="name.set($any($event.target).value)"
+          />
+        </div>
+        <div class="field">
+          <label for="cdesc">说明（可选）</label>
+          <input
+            id="cdesc" type="text" placeholder="入排标准的一句话概括"
+            [value]="description()" (input)="description.set($any($event.target).value)"
+          />
+        </div>
+      </div>
+      @if (saveError(); as err) {
+        <p class="alert alert-error" role="alert">{{ err }}</p>
+      }
+      <div class="save-actions">
+        @if (editingId()) {
+          <button class="btn btn-ghost" type="button" (click)="resetForm()">另存为新队列</button>
+        }
+        <button class="btn" type="button" [disabled]="!canSave()" (click)="save()">
+          {{ editingId() ? '更新' : '保存' }}
+        </button>
+      </div>
+    </div>
+  </section>
+
+  <aside class="panel preview" aria-label="队列预览" aria-live="polite">
+    <h2>预览</h2>
+    @if (!complete()) {
+      <p class="hint">填完所有条件的取值后自动预览。</p>
+    } @else if (preview.isLoading()) {
+      <p class="hint" role="status">正在计算…</p>
+    } @else if (preview.error()) {
+      <p class="alert alert-error" role="alert">
+        条件有问题，算不出来。检查一下运算符和取值是否匹配变量类型。
+      </p>
+    } @else if (preview.hasValue()) {
+      <app-consort-flow [preview]="preview.value()!" />
+    }
+  </aside>
+</div>

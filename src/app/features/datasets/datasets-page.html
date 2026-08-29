@@ -1,0 +1,63 @@
+<header class="page-head">
+  <h1>数据集</h1>
+  <p>公开医疗数据集经适配层映射到统一数据模型（CDM）后即可分析。</p>
+</header>
+
+@if (datasets.isLoading()) {
+  <p class="hint" role="status">正在读取数据集清单…</p>
+} @else if (datasets.error()) {
+  <p class="alert alert-error" role="alert">
+    读不到后端。请确认 API 已在 8000 端口启动：<code>backend/run.sh</code>
+  </p>
+}
+
+@if (importError(); as err) {
+  <p class="alert alert-error" role="alert">{{ err }}</p>
+}
+
+<ul class="cards">
+  @for (d of datasets.value(); track d.id) {
+    <li class="panel card">
+      <div class="card-head">
+        <h2>{{ d.label }}</h2>
+        @if (d.imported) {
+          <span class="tag tag-ok">已导入</span>
+        } @else if (d.available) {
+          <span class="tag tag-idle">待导入</span>
+        } @else {
+          <span class="tag tag-warn">缺原始文件</span>
+        }
+      </div>
+
+      <p class="desc">{{ d.description }}</p>
+
+      <dl class="meta">
+        <div><dt>版本</dt><dd class="mono">{{ d.version }}</dd></div>
+        @if (d.imported) {
+          <div><dt>样本量</dt><dd class="mono">{{ d.n_person }}</dd></div>
+          <div><dt>导入时间</dt><dd class="mono">{{ d.imported_at?.slice(0, 19) }}</dd></div>
+        }
+      </dl>
+
+      <div class="card-foot">
+        <a class="src" [href]="d.source_url" target="_blank" rel="noopener">数据集来源 ↗</a>
+        <button
+          class="btn"
+          type="button"
+          [disabled]="!d.available || importingId() !== null"
+          (click)="runImport(d)"
+        >
+          @if (importingId() === d.id) {
+            {{ importStage() }}…
+          } @else {
+            {{ d.imported ? '重新导入' : '导入' }}
+          }
+        </button>
+      </div>
+    </li>
+  } @empty {
+    @if (!datasets.isLoading()) {
+      <li class="hint">没有已注册的数据集适配器。</li>
+    }
+  }
+</ul>

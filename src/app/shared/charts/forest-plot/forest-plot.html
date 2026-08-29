@@ -1,0 +1,81 @@
+<div class="layout">
+  <app-echart [option]="option()" [ariaLabel]="ariaLabel()" [height]="chartHeight()" />
+
+  <div class="scroller">
+    <table>
+      <caption class="sr-only">{{ result().model }}各项效应量、置信区间与 p 值</caption>
+      <thead>
+        <tr>
+          <th scope="col">项目</th>
+          <th scope="col" class="num">{{ result().effect_label }}</th>
+          <th scope="col" class="num">{{ result().conf_level * 100 }}% CI</th>
+          <th scope="col" class="num"><i>p</i></th>
+          @if (hasPh()) {
+            <th scope="col" class="num">PH <i>p</i></th>
+          }
+        </tr>
+      </thead>
+      <tbody>
+        @for (row of rows(); track row.label) {
+          <tr [class.is-sig]="row.significant">
+            <th scope="row">
+              {{ row.label }}
+              @if (row.reference) {
+                <span class="ref">参照：{{ row.reference }}</span>
+              }
+            </th>
+            <td class="num">{{ formatEffect(row.estimate) }}</td>
+            <td class="num">
+              {{ formatEffect(row.ci_lower) }}–{{ formatEffect(row.ci_upper) }}
+              @if (row.clamped) {
+                <span class="warn-mark" title="区间过宽，图上已截断">†</span>
+              }
+            </td>
+            <td class="num">{{ formatP(row.p) }}</td>
+            @if (hasPh()) {
+              <td class="num" [class.ph-fail]="(phByLabel().get(row.label) ?? 1) < 0.05">
+                {{ phByLabel().has(row.label) ? formatP(phByLabel().get(row.label)!) : '—' }}
+              </td>
+            }
+          </tr>
+        }
+      </tbody>
+    </table>
+  </div>
+</div>
+
+<dl class="stats">
+  <div><dt>纳入例数</dt><dd>{{ result().n_used }}</dd></div>
+  <div><dt>事件数</dt><dd>{{ result().n_events }}</dd></div>
+  @if (result().n_dropped > 0) {
+    <div><dt>因缺失剔除</dt><dd class="warn">{{ result().n_dropped }}</dd></div>
+  }
+  @if (result().concordance !== undefined) {
+    <div><dt>C-index</dt><dd>{{ result().concordance!.toFixed(3) }}</dd></div>
+  }
+  @if (result().pseudo_r2 !== undefined) {
+    <div><dt>伪 R²</dt><dd>{{ result().pseudo_r2!.toFixed(3) }}</dd></div>
+  }
+  @if (result().roc?.auc) {
+    <div><dt>AUC</dt><dd>{{ result().roc!.auc!.toFixed(3) }}</dd></div>
+  }
+</dl>
+
+@if (hasRoc()) {
+  <section class="roc">
+    <h4>ROC 曲线</h4>
+    <app-echart
+      [option]="rocOption()"
+      ariaLabel="ROC 曲线，AUC 见上方统计"
+      height="300px"
+    />
+  </section>
+}
+
+@if (result().notes.length) {
+  <ul class="notes">
+    @for (note of result().notes; track note) {
+      <li>{{ note }}</li>
+    }
+  </ul>
+}

@@ -1,0 +1,75 @@
+.sr-only {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  overflow: hidden;
+  clip-path: inset(50%);
+  white-space: nowrap;
+}
+
+figure {
+  margin: 0;
+  border: 1px solid var(--rule);
+  border-radius: var(--radius);
+  padding: 14px 16px 16px;
+  background: var(--surface);
+}
+
+figcaption {
+  font-size: 14px;
+  font-weight: 700;
+  margin-bottom: 10px;
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 10px;
+}
+
+.missing {
+  font-size: 11px;
+  font-weight: 600;
+  color: var(--amber);
+  background: var(--amber-wash);
+  padding: 1px 6px;
+  border-radius: 2px;
+}
+
+.scroller { overflow-x: auto; margin-top: 10px; }
+
+table {
+  border-collapse: collapse;
+  width: 100%;
+  font-size: 12.5px;
+  font-variant-numeric: tabular-nums;
+}
+
+th,
+td {
+  padding: 6px 10px;
+  text-align: left;
+  border-bottom: 1px solid var(--rule);
+  white-space: nowrap;
+}
+
+thead th {
+  font-size: 10.5px;
+  letter-spacing: 0.05em;
+  text-transform: uppercase;
+  color: var(--muted);
+  font-weight: 600;
+  background: var(--surface-2);
+}
+
+tbody tr:last-child td,
+tbody tr:last-child th { border-bottom: 0; }
+
+.num { text-align: right; }
+
+.swatch {
+  display: inline-block;
+  width: 9px;
+  height: 9px;
+  border-radius: 2px;
+  margin-right: 7px;
+  vertical-align: -1px;
+}

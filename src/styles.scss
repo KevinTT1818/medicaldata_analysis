@@ -1,1 +1,185 @@
-/* You can add global styles to this file, and also import other style files */
+/* 全局设计令牌与基础排版。配色沿用系统设计文档的临床青。 */
+
+:root {
+  --ground: #f7f9fa;
+  --surface: #ffffff;
+  --surface-2: #eff4f4;
+  --ink: #16232b;
+  --ink-2: #33474f;
+  --muted: #5c6e75;
+  --rule: #dbe4e6;
+  --rule-strong: #bccccf;
+  --accent: #0e7c86;
+  --accent-ink: #0a5b63;
+  --accent-wash: #e2efef;
+  --amber: #8f5d10;
+  --amber-wash: #f6eedf;
+  --rose: #9c3a4e;
+  --rose-wash: #f6e7ea;
+
+  --font-body: 'Public Sans', 'PingFang SC', 'Hiragino Sans GB', 'Microsoft YaHei',
+    -apple-system, BlinkMacSystemFont, sans-serif;
+  --font-mono: 'SF Mono', ui-monospace, Menlo, Consolas, monospace;
+
+  --radius: 3px;
+  --shadow: 0 1px 2px rgb(22 35 43 / 5%), 0 8px 24px -16px rgb(22 35 43 / 18%);
+}
+
+@media (prefers-color-scheme: dark) {
+  :root {
+    --ground: #0e1518;
+    --surface: #151e22;
+    --surface-2: #1b262b;
+    --ink: #e2eaec;
+    --ink-2: #c0cfd3;
+    --muted: #8da1a7;
+    --rule: #25333a;
+    --rule-strong: #37484f;
+    --accent: #4fb6bb;
+    --accent-ink: #7fcfd2;
+    --accent-wash: #122f33;
+    --amber: #d8a354;
+    --amber-wash: #2c2317;
+    --rose: #de8c9c;
+    --rose-wash: #2e1b20;
+    --shadow: 0 1px 2px rgb(0 0 0 / 30%), 0 8px 24px -16px rgb(0 0 0 / 60%);
+  }
+}
+
+* {
+  box-sizing: border-box;
+}
+
+html,
+body {
+  margin: 0;
+  padding: 0;
+}
+
+body {
+  background: var(--ground);
+  color: var(--ink);
+  font-family: var(--font-body);
+  font-size: 15px;
+  line-height: 1.65;
+  -webkit-font-smoothing: antialiased;
+}
+
+:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+}
+
+button,
+select,
+input {
+  font: inherit;
+  color: inherit;
+}
+
+/* 共用控件 */
+
+.btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 16px;
+  border: 1px solid var(--accent);
+  border-radius: var(--radius);
+  background: var(--accent);
+  color: #fff;
+  cursor: pointer;
+  font-weight: 600;
+  font-size: 14px;
+}
+
+.btn:hover:not(:disabled) {
+  background: var(--accent-ink);
+  border-color: var(--accent-ink);
+}
+
+.btn:disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
+}
+
+.btn-ghost {
+  background: transparent;
+  color: var(--accent-ink);
+}
+
+.btn-ghost:hover:not(:disabled) {
+  background: var(--accent-wash);
+  border-color: var(--accent);
+  color: var(--accent-ink);
+}
+
+.field {
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+}
+
+.field > label {
+  font-size: 12px;
+  font-weight: 600;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  color: var(--muted);
+}
+
+.field select {
+  padding: 7px 10px;
+  border: 1px solid var(--rule-strong);
+  border-radius: var(--radius);
+  background: var(--surface);
+}
+
+.panel {
+  background: var(--surface);
+  border: 1px solid var(--rule);
+  border-radius: var(--radius);
+  box-shadow: var(--shadow);
+}
+
+.mono {
+  font-family: var(--font-mono);
+  font-size: 12px;
+}
+
+/* 提示与告警。原本在 4–5 个组件样式表里各写了一遍，抽到这里统一。 */
+
+.hint {
+  color: var(--muted);
+  font-size: 13.5px;
+}
+
+.alert {
+  padding: 10px 14px;
+  border: 1px solid;
+  border-radius: var(--radius);
+  margin: 0 0 14px;
+  font-size: 13.5px;
+}
+
+.alert-error {
+  color: var(--rose);
+  background: var(--rose-wash);
+  border-color: currentcolor;
+}
+
+.alert-warn {
+  color: var(--amber);
+  background: var(--amber-wash);
+  border-color: currentcolor;
+}
+
+.btn.sm {
+  padding: 3px 9px;
+  font-size: 12px;
+  font-weight: 500;
+}
+
+.scroller {
+  overflow-x: auto;
+}
