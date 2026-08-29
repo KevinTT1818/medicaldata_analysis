@@ -3,6 +3,9 @@
     <span class="badge">已加权</span>
     按复杂抽样权重给出人群估计。Kish 有效样本量
     <strong>{{ result().effective_n }}</strong>（实际 {{ result().overall_n }} 例）。
+    @if (designNote(); as note) {
+      <span class="design">{{ note }}</span>
+    }
   </p>
 } @else if (result().weights_available) {
   <p class="survey-note is-warn">

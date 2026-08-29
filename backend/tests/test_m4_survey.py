@@ -183,14 +183,39 @@ class WeightingModeTest(Base):
         self.assertFalse(out["weighted"])
         self.assertFalse(out["weights_available"])
 
-    def test_weighted_mode_suppresses_p_values(self):
-        """加权点估计配未加权 p 值是自相矛盾的，宁可不出。"""
+    def test_weighted_mode_uses_design_based_test(self):
+        """加权模式的 p 值来自设计校正 Wald 检验，不是未加权的 t 检验。
+
+        （早先的实现在加权模式下不出 p 值，因为方差估计还没做。现在做了。）
+        """
         out = self.run_analysis(
             "describe.baseline_table", variables=[AGE], group_by=SEX
         ).payload
         self.assertTrue(out["weighted"])
-        self.assertTrue(all(r["p"] is None for r in out["rows"]))
-        self.assertTrue(any("不出 p 值" in n for n in out["notes"]))
+        row = out["rows"][0]
+        self.assertIsNotNone(row["p"])
+        self.assertEqual(row["test"], "设计校正 Wald 检验")
+        self.assertTrue(any("Taylor 线性化" in n for n in out["notes"]))
+
+    def test_weighted_mode_reports_design_parameters(self):
+        out = self.run_analysis(
+            "describe.baseline_table", variables=[AGE], group_by=SEX
+        ).payload
+        design = out["design"]
+        # NHANES 2017–2018：15 层 × 2 PSU，自由度 15，与 NCHS 官方一致
+        self.assertEqual(design["n_strata"], 15)
+        self.assertEqual(design["n_psu"], 30)
+        self.assertEqual(design["df"], 15)
+        self.assertFalse(design["approximate"])
+
+    def test_weighted_continuous_rows_report_means(self):
+        """加权时一律报均值 —— 检验比的是均值，显示中位数读者对不上。"""
+        out = self.run_analysis(
+            "describe.baseline_table", variables=[AGE, BMI], group_by=SEX
+        ).payload
+        for row in out["rows"]:
+            if row["kind"] == "continuous":
+                self.assertEqual(row["stat"], "mean_sd")
 
     def test_unweighted_mode_gives_p_values_with_a_warning(self):
         result = self.run_analysis(
@@ -377,3 +402,171 @@ class JobStateTest(Base):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TaylorLinearisationTest(unittest.TestCase):
+    """方差估计量本身的数学性质。不依赖具体数据集。"""
+
+    def _simple(self, n=200, seed=0):
+        import numpy as np
+        from app.analyses import survey
+        rng = np.random.default_rng(seed)
+        y = rng.normal(10, 3, n)
+        return y, survey.build_design(np.ones(n), None, None)
+
+    def test_degenerates_to_ordinary_se_without_design(self):
+        """等权、单层、每人一个 PSU —— 应当退化成普通标准误。"""
+        import numpy as np
+        from app.analyses import survey
+        y, design = self._simple()
+        est = survey.domain_mean(y, design)
+        self.assertAlmostEqual(est.value, float(np.mean(y)), places=10)
+        ordinary = float(np.std(y, ddof=1) / np.sqrt(y.size))
+        self.assertAlmostEqual(est.se, ordinary, places=6)
+        self.assertAlmostEqual(est.deff, 1.0, delta=0.02)
+
+    def test_clustering_inflates_variance(self):
+        """把观测塞进少数几个 PSU，方差必须变大 —— 这正是忽略聚类会低估的东西。"""
+        import numpy as np
+        from app.analyses import survey
+        rng = np.random.default_rng(1)
+        n = 400
+        # 20 个 PSU，PSU 内有共同的随机效应 -> 组内相关
+        psu = np.repeat(np.arange(20), n // 20)
+        y = rng.normal(0, 1, n) + np.repeat(rng.normal(0, 2, 20), n // 20)
+        w = np.ones(n)
+
+        clustered = survey.domain_mean(
+            y, survey.build_design(w, np.zeros(n), psu))
+        independent = survey.domain_mean(y, survey.build_design(w, None, None))
+        self.assertGreater(clustered.se, independent.se * 2)
+        self.assertGreater(clustered.deff, 3.0)
+
+    def test_degrees_of_freedom_is_psu_minus_strata(self):
+        import numpy as np
+        from app.analyses import survey
+        strata = np.repeat(np.arange(5), 40)
+        psu = np.tile(np.repeat(np.arange(2), 20), 5)
+        design = survey.build_design(np.ones(200), strata, psu)
+        self.assertEqual(design.n_strata, 5)
+        self.assertEqual(design.n_psu, 10)
+        self.assertEqual(design.df, 5)
+
+    def test_singleton_strata_are_counted(self):
+        import numpy as np
+        from app.analyses import survey
+        strata = np.array([0, 0, 1, 1, 2, 2])
+        psu = np.array([0, 1, 0, 1, 0, 0])   # 第 2 层只有一个 PSU
+        design = survey.build_design(np.ones(6), strata, psu)
+        self.assertEqual(design.singleton_strata(), 1)
+
+    def test_domain_estimation_keeps_all_psus(self):
+        """域估计不能先切数据 —— 切掉会让某些 PSU 消失，方差就不对了。
+
+        这里验证：域内均值等于把域外权重置零后的加权均值，
+        但方差是在完整设计上算的（自由度不变）。
+        """
+        import numpy as np
+        from app.analyses import survey
+        rng = np.random.default_rng(2)
+        n = 300
+        strata = np.repeat(np.arange(3), 100)
+        psu = np.tile(np.repeat(np.arange(2), 50), 3)
+        y = rng.normal(5, 2, n)
+        w = rng.uniform(1, 5, n)
+        domain = rng.random(n) < 0.5
+
+        design = survey.build_design(w, strata, psu)
+        est = survey.domain_mean(y, design, domain)
+
+        expected = float((w[domain] * y[domain]).sum() / w[domain].sum())
+        self.assertAlmostEqual(est.value, expected, places=10)
+        self.assertEqual(est.df, design.df)
+
+    def test_wald_test_detects_a_real_difference(self):
+        import numpy as np
+        from app.analyses import survey
+        rng = np.random.default_rng(3)
+        n = 400
+        strata = np.repeat(np.arange(10), 40)
+        psu = np.tile(np.repeat(np.arange(2), 20), 10)
+        group = rng.random(n) < 0.5
+        y = rng.normal(0, 1, n) + group * 2.0        # 组间差 2 个标准差
+        design = survey.build_design(np.ones(n), strata, psu)
+        out = survey.wald_test(y, design, [group, ~group])
+        self.assertIsNotNone(out["p"])
+        self.assertLess(out["p"], 0.001)
+
+    def test_wald_test_accepts_no_difference(self):
+        import numpy as np
+        from app.analyses import survey
+        rng = np.random.default_rng(4)
+        n = 400
+        strata = np.repeat(np.arange(10), 40)
+        psu = np.tile(np.repeat(np.arange(2), 20), 10)
+        group = rng.random(n) < 0.5
+        y = rng.normal(0, 1, n)                      # 组间无差异
+        design = survey.build_design(np.ones(n), strata, psu)
+        out = survey.wald_test(y, design, [group, ~group])
+        self.assertGreater(out["p"], 0.05)
+
+    def test_wald_refuses_when_contrasts_exceed_df(self):
+        """对比数超过设计自由度时该检验不可估计，必须明说而不是给个数字。"""
+        import numpy as np
+        from app.analyses import survey
+        n = 60
+        strata = np.repeat(np.arange(2), 30)
+        psu = np.tile(np.repeat(np.arange(2), 15), 2)   # df = 4 - 2 = 2
+        design = survey.build_design(np.ones(n), strata, psu)
+        categories = np.array(["a", "b", "c", "d"] * 15)
+        groups = [np.arange(n) % 3 == k for k in range(3)]
+        out = survey.categorical_wald_test(
+            categories, ["a", "b", "c", "d"], design, groups)
+        self.assertIsNone(out["p"])
+        self.assertIn("超过设计自由度", out["detail"])
+
+
+class NhanesStandardErrorTest(Base):
+    """与 NCHS 官方口径对照。"""
+
+    def _adult_design(self):
+        import numpy as np
+        from app.analyses import survey
+        frame = builder.build_feature_frame(NH, [AGE, BMI])
+        age = frame[AGE].cast(float).to_numpy()
+        bmi = frame[BMI].cast(float, strict=False).to_numpy()
+        design = survey.build_design(
+            frame[builder.WEIGHT_COLUMN].cast(float).to_numpy(),
+            frame[builder.STRATUM_COLUMN].to_numpy(),
+            frame[builder.PSU_COLUMN].to_numpy(),
+        )
+        return bmi, design, (age >= 20) & np.isfinite(bmi)
+
+    def test_design_parameters_match_nchs(self):
+        _, design, _ = self._adult_design()
+        self.assertEqual(design.n_strata, 15)
+        self.assertEqual(design.n_psu, 30)
+        self.assertEqual(design.df, 15)
+        self.assertEqual(design.singleton_strata(), 0)
+
+    def test_obesity_confidence_interval_covers_published_figure(self):
+        """NCHS Data Brief 360：2017–2018 年美国成人肥胖率 42.4%。"""
+        from app.analyses import survey
+        bmi, design, adults = self._adult_design()
+        est = survey.domain_proportion((bmi >= 30).astype(float), design, adults)
+        self.assertAlmostEqual(est.value * 100, 42.4, delta=0.6)
+        self.assertLess(est.ci_low * 100, 42.4)
+        self.assertGreater(est.ci_high * 100, 42.4)
+        self.assertEqual(est.df, 15)
+
+    def test_design_se_is_much_larger_than_srs_se(self):
+        """忽略聚类会低估标准误 —— 这正是必须做设计校正的理由。"""
+        import numpy as np
+        from app.analyses import survey
+        bmi, design, adults = self._adult_design()
+        est = survey.domain_proportion((bmi >= 30).astype(float), design, adults)
+
+        n = int(adults.sum())
+        srs_se = float(np.sqrt(est.value * (1 - est.value) / n))
+        self.assertGreater(est.se, srs_se * 2)
+        self.assertGreater(est.deff, 3.0)

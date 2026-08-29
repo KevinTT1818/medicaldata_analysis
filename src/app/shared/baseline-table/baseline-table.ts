@@ -26,8 +26,18 @@ export class BaselineTable {
 
   readonly hasGroups = computed(() => this.result().groups.length > 0);
 
-  /** 加权模式下 p 值一律为空，整列不显示，免得让人以为是漏算了。 */
-  readonly showTests = computed(() => this.hasGroups() && !this.result().weighted);
+  /** 有分组就有检验。加权时走设计校正 Wald，非加权时走 t / 卡方。 */
+  readonly showTests = computed(() => this.hasGroups());
+
+  /** 加权且带完整抽样设计时，把自由度亮出来 —— 它决定了 p 值有多可信。 */
+  readonly designNote = computed(() => {
+    const r = this.result();
+    if (!r.weighted || !r.design) return null;
+    if (r.design.approximate) {
+      return '只有权重、没有分层与初级抽样单元，标准误按有放回抽样近似，会偏小';
+    }
+    return `${r.design.n_strata} 层 · ${r.design.n_psu} 个 PSU · 设计自由度 ${r.design.df}`;
+  });
 
   rowLabel(row: BaselineRow): string {
     const unit = row.unit ? ` (${row.unit})` : '';

@@ -10,7 +10,8 @@ from pydantic import BaseModel, Field
 from scipy import stats
 
 from ..cdm import values
-from ..cohort.builder import Variable
+from ..cohort.builder import PSU_COLUMN, STRATUM_COLUMN, Variable
+from . import survey
 from . import weights as W
 from .base import Analysis, AnalysisContext, AnalysisResult
 from .registry import register
@@ -66,6 +67,7 @@ def _continuous_row(
     frame: pl.DataFrame, vid: str, v: Variable,
     group_masks: list[tuple[str, np.ndarray]], alpha: float,
     sample_weights: np.ndarray | None = None,
+    design: survey.Design | None = None,
 ) -> dict[str, Any]:
     vals = _as_numeric(frame, vid)
     valid = np.isfinite(vals)
@@ -75,9 +77,12 @@ def _continuous_row(
 
     per_group = [(label, vals[mask & valid]) for label, mask in group_masks]
     testable = [a for _, a in per_group if a.size >= 2 and np.ptp(a) > 0]
-    # 正态性判断只看分布形状，用未加权样本即可 —— 加权改变的是各观测的代表性，
-    # 不改变分布形状。选定统计量之后再按权重计算。
-    normal = _is_normal([a for _, a in per_group] or [vals[valid]], alpha)
+    # 加权模式一律报均值：设计校正的 Wald 检验比的是各组均值，
+    # 表里显示中位数却拿均值去检验，读者对不上。
+    # 未加权时仍按正态性在均值和中位数之间选。
+    normal = True if weighted else _is_normal(
+        [a for _, a in per_group] or [vals[valid]], alpha
+    )
 
     def describe_masked(mask: np.ndarray) -> str:
         a = vals[mask]
@@ -103,10 +108,16 @@ def _continuous_row(
     test: str | None = None
     warnings: list[str] = []
 
-    # 加权模式下不出 p 值：复杂抽样的标准误要 Taylor 线性化 + 分层/PSU，
-    # 拿未加权的检验统计量配加权的点估计是自相矛盾的
+    # 加权时走设计校正的 Wald 检验：把统计量线性化后按层内 PSU 的离散度求方差。
+    # 用未加权的 t 检验配加权的点估计是自相矛盾的，所以两条路互斥。
     if weighted:
-        pass
+        if design is not None and group_masks:
+            outcome = survey.wald_test(
+                vals, design, [mask & valid for _, mask in group_masks]
+            )
+            p, test = outcome["p"], outcome["test"]
+            if outcome.get("detail"):
+                warnings.append(f"「{v.label}」未做检验：{outcome['detail']}")
     elif len(testable) >= 2 and len(testable) == len(per_group):
         if len(testable) == 2:
             if normal:
@@ -145,6 +156,7 @@ def _categorical_row(
     frame: pl.DataFrame, vid: str, v: Variable,
     group_masks: list[tuple[str, np.ndarray]],
     sample_weights: np.ndarray | None = None,
+    design: survey.Design | None = None,
 ) -> dict[str, Any]:
     weighted = sample_weights is not None
     cats = _as_category(frame, vid, v)
@@ -183,7 +195,14 @@ def _categorical_row(
     test: str | None = None
     warnings: list[str] = []
 
-    if group_masks and len(levels) >= 2 and not weighted:
+    if weighted and design is not None and group_masks and len(levels) >= 2:
+        outcome = survey.categorical_wald_test(
+            arr, levels, design, [mask & notnull for _, mask in group_masks]
+        )
+        p, test = outcome["p"], outcome["test"]
+        if outcome.get("detail"):
+            warnings.append(f"「{v.label}」未做检验：{outcome['detail']}")
+    elif group_masks and len(levels) >= 2 and not weighted:
         table = np.array([
             [int((arr[mask & notnull] == lv).sum()) for _, mask in group_masks]
             for lv in levels
@@ -272,6 +291,19 @@ class BaselineTable(Analysis):
         use_weights = raw_weights if (available and p.weighting != "unweighted") else None
         weighted = use_weights is not None
 
+        design = None
+        if weighted:
+            strata = (frame[STRATUM_COLUMN].to_numpy()
+                      if STRATUM_COLUMN in frame.columns else None)
+            psus = (frame[PSU_COLUMN].to_numpy()
+                    if PSU_COLUMN in frame.columns else None)
+            if strata is not None and psus is not None:
+                if not (pl.Series(strata).is_not_null().any()
+                        and pl.Series(psus).is_not_null().any()):
+                    strata = psus = None
+            design = survey.build_design(use_weights, strata, psus)
+
+        analysis_warnings: list[str] = []
         group_masks: list[tuple[str, np.ndarray]] = []
         groups_meta: list[dict[str, Any]] = []
 
@@ -298,9 +330,10 @@ class BaselineTable(Analysis):
             v = ctx.catalog[vid]
             if v.kind == "continuous":
                 rows.append(_continuous_row(
-                    frame, vid, v, group_masks, p.normality_alpha, use_weights))
+                    frame, vid, v, group_masks, p.normality_alpha, use_weights, design))
             else:
-                rows.append(_categorical_row(frame, vid, v, group_masks, use_weights))
+                rows.append(_categorical_row(
+                    frame, vid, v, group_masks, use_weights, design))
 
         # --- 多重比较校正 ---
         idx = [i for i, r in enumerate(rows) if r["p"] is not None]
@@ -314,18 +347,31 @@ class BaselineTable(Analysis):
                 rows[i]["p_adj"] = float(a)
 
         notes: list[str] = []
-        analysis_warnings: list[str] = []
 
         if weighted:
             notes.append(
                 "已按抽样权重给出人群估计。分类变量括号内是加权后的人群构成比，"
-                "括号外的例数仍是实际观测数。"
+                "括号外的例数仍是实际观测数；连续变量一律报均值 ± 标准差 —— "
+                "检验比的是各组均值，显示中位数会让读者对不上。"
             )
-            notes.append(
-                "加权模式不出 p 值：复杂抽样下的标准误需要 Taylor 线性化并考虑分层与"
-                "初级抽样单元，本版本未实现。需要 p 值请切到「不加权」，"
-                "但那时的结论只适用于样本本身。"
-            )
+            if design is not None and not design.approximate:
+                notes.append(
+                    f"p 值来自设计校正的 Wald 检验：统计量经 Taylor 线性化后，"
+                    f"按层内初级抽样单元的离散度估计方差。"
+                    f"{design.n_strata} 层、{design.n_psu} 个 PSU，"
+                    f"设计自由度 {design.df}。"
+                )
+                singletons = design.singleton_strata()
+                if singletons:
+                    analysis_warnings.append(
+                        f"有 {singletons} 个层只剩一个初级抽样单元，"
+                        f"它们对方差贡献不了信息，标准误会偏小。队列可能切得太碎了。"
+                    )
+            else:
+                analysis_warnings.append(
+                    "该数据集只有抽样权重、没有分层与初级抽样单元，"
+                    "标准误按有放回抽样近似。聚类会把真实方差抬高，这里会低估。"
+                )
             notes.append(
                 f"Kish 有效样本量 {W.effective_n(use_weights):.0f}"
                 f"（实际 {frame.height} 例）—— 权重差异越大，有效信息越少。"
@@ -361,6 +407,15 @@ class BaselineTable(Analysis):
                 "weights_available": available,
                 "effective_n": (
                     round(W.effective_n(use_weights), 1) if weighted else None
+                ),
+                "design": (
+                    {
+                        "n_strata": design.n_strata,
+                        "n_psu": design.n_psu,
+                        "df": design.df,
+                        "approximate": design.approximate,
+                    }
+                    if design is not None else None
                 ),
                 "notes": notes,
             },

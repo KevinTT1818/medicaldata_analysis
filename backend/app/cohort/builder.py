@@ -259,9 +259,12 @@ TIME_SUFFIX = "#time"
 MeasurementAgg = Literal["first", "last", "mean", "min", "max"]
 DEFAULT_AGG: MeasurementAgg = "first"
 
-#: 抽样权重在宽表里的保留列名。它是抽样设计元数据，不是分析变量，
-#: 不出现在变量目录里，但每张宽表都带着，好让算子能做人群加权估计。
+#: 抽样设计在宽表里的保留列名。它们是设计元数据不是分析变量，
+#: 不出现在变量目录里，但每张宽表都带着 —— 加权点估计只需要权重，
+#: 但要算标准误就必须同时有分层与初级抽样单元。
 WEIGHT_COLUMN = "__weight"
+STRATUM_COLUMN = "__stratum"
+PSU_COLUMN = "__psu"
 
 
 def _select_expr(
@@ -361,6 +364,21 @@ def person_count(dataset: str) -> int:
     return int(row[0]) if row else 0
 
 
+def has_survey_design(dataset: str) -> bool:
+    """是否带完整的抽样设计（权重 + 分层 + 初级抽样单元）。
+
+    只有权重没有分层/PSU 时点估计仍然正确，但标准误只能按简单随机抽样近似，
+    会低估真实的抽样误差 —— 聚类会把方差抬上去。
+    """
+    with store.read() as cur:
+        row = cur.execute(
+            """SELECT count(sample_weight), count(stratum), count(psu)
+               FROM person WHERE dataset = ?""",
+            [dataset],
+        ).fetchone()
+    return bool(row and row[0] and row[1] and row[2])
+
+
 def has_repeated_measures(dataset: str) -> bool:
     """数据集里是否存在「一个人同一个测量项有多个值」。
 
@@ -402,7 +420,12 @@ def build_feature_frame(
     agg 决定一人一项有多个值时取哪一个。横断面数据集只有一个值，取哪个都一样；
     住院时序数据（MIMIC）平均每人每项 43 个值，这个选择会实实在在改变结论。
     """
-    selects = ["p.person_id", f'p.sample_weight AS "{WEIGHT_COLUMN}"']
+    selects = [
+        "p.person_id",
+        f'p.sample_weight AS "{WEIGHT_COLUMN}"',
+        f'p.stratum AS "{STRATUM_COLUMN}"',
+        f'p.psu AS "{PSU_COLUMN}"',
+    ]
     joins: list[str] = []
     params: dict[str, Any] = {"ds": dataset}
 

@@ -125,6 +125,14 @@ export interface BaselineTableResult {
   weights_available: boolean;
   /** Kish 有效样本量：权重差异越大，有效信息越少。 */
   effective_n: number | null;
+  /** 抽样设计参数。加权时 p 值来自设计校正 Wald 检验，自由度就是这里的 df。 */
+  design: {
+    n_strata: number;
+    n_psu: number;
+    df: number;
+    /** 只有权重、没有分层与 PSU 时为 true，标准误按有放回抽样近似。 */
+    approximate: boolean;
+  } | null;
   notes: string[];
 }
 
