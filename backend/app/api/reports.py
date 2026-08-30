@@ -1,16 +1,30 @@
 from __future__ import annotations
 
 from typing import Any
+from urllib.parse import quote
 
 from fastapi import APIRouter, HTTPException
-from pydantic import BaseModel
+from fastapi.responses import StreamingResponse
+from pydantic import BaseModel, Field
 
 from ..cohort.filters import FilterError
+from ..report import docx_export
 from ..report import runner as report_runner
 from ..report import store as report_store
 from ..report.models import ReportInput, SectionSnapshot
 
 router = APIRouter(prefix="/api/reports", tags=["reports"])
+
+
+class ExportRequest(BaseModel):
+    """导出请求。
+
+    图表由前端把 ECharts 画布转成 PNG data URL 一起送上来 —— 键是小节序号，
+    值是该节的图片列表（一节可能有多张图）。服务端不重画：重画要引一套绘图依赖，
+    还得和用户屏幕上看到的完全一致，那是两份必然互相偏离的实现。
+    """
+
+    images: dict[str, list[str]] = Field(default_factory=dict)
 
 
 class SaveWithBaseline(BaseModel):
@@ -92,3 +106,25 @@ def _build_snapshot(req: SaveWithBaseline) -> list[SectionSnapshot]:
             400, f"这些小节跑不通，无法建立基线：{'、'.join(failed)}"
         )
     return [SectionSnapshot(**o["snapshot"]) for o in outputs]
+
+
+@router.post("/{report_id}/export/docx")
+def export_docx(report_id: str, req: ExportRequest) -> StreamingResponse:
+    """重跑报告并导出成 Word 文档。结果走缓存，重跑通常很快。"""
+    try:
+        run = report_runner.run_report(report_id)
+    except KeyError as exc:
+        raise HTTPException(404, str(exc)) from exc
+
+    buffer = docx_export.build(run, req.images)
+    filename = quote(f"{run['report']['title']}.docx")
+    return StreamingResponse(
+        buffer,
+        media_type=(
+            "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
+        ),
+        headers={
+            # 文件名含中文，必须用 RFC 5987 的 filename* 形式
+            "Content-Disposition": f"attachment; filename*=UTF-8\'\'{filename}"
+        },
+    )

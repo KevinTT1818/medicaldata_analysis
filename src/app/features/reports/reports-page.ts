@@ -153,4 +153,52 @@ export class ReportsPage {
   print(): void {
     window.print();
   }
+
+  /**
+   * 把每一节的图表画布转成 PNG。
+   *
+   * ECharts 的画布背景是透明的，直接导出到 Word 里会压在默认底色上，
+   * 深色主题下的浅色文字会看不见。所以先合成到当前主题的画布底色上再导出。
+   */
+  private captureCharts(): Record<string, string[]> {
+    const background = getComputedStyle(document.documentElement)
+      .getPropertyValue('--surface').trim() || '#ffffff';
+    const images: Record<string, string[]> = {};
+
+    document.querySelectorAll('.report-doc .section').forEach((section, index) => {
+      const shots: string[] = [];
+      section.querySelectorAll('canvas').forEach((canvas) => {
+        if (!canvas.width || !canvas.height) return;
+        try {
+          const flattened = document.createElement('canvas');
+          flattened.width = canvas.width;
+          flattened.height = canvas.height;
+          const context = flattened.getContext('2d');
+          if (!context) return;
+          context.fillStyle = background;
+          context.fillRect(0, 0, flattened.width, flattened.height);
+          context.drawImage(canvas, 0, 0);
+          shots.push(flattened.toDataURL('image/png'));
+        } catch {
+          // 单张图取不到不影响其余内容，后端也会在原位说明
+        }
+      });
+      if (shots.length) images[String(index)] = shots;
+    });
+    return images;
+  }
+
+  async exportDocx(id: string, title: string): Promise<void> {
+    const blob = await this.withBusy('生成 Word 文档', () =>
+      firstValueFrom(this.api.exportDocx(id, this.captureCharts())),
+    );
+    if (!blob) return;
+
+    const url = URL.createObjectURL(blob);
+    const link = document.createElement('a');
+    link.href = url;
+    link.download = `${title}.docx`;
+    link.click();
+    URL.revokeObjectURL(url);
+  }
 }

@@ -97,7 +97,10 @@
             </p>
           </div>
           <div class="doc-actions no-print">
-            <button class="btn btn-ghost sm" type="button" (click)="print()">导出 / 打印</button>
+            <button class="btn btn-ghost sm" type="button"
+                    [disabled]="busy()"
+                    (click)="exportDocx(r.report.id, r.report.title)">导出 Word</button>
+            <button class="btn btn-ghost sm" type="button" (click)="print()">打印 / PDF</button>
             @if (reproSummary(); as sum) {
               @if (sum.changed > 0) {
                 <button class="btn btn-ghost sm" type="button"

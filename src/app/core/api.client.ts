@@ -87,6 +87,12 @@ export class ApiClient {
     return this.http.post<SavedReport>(`/api/reports/${id}/rebaseline`, {});
   }
 
+  /** 导出 Word。图表由前端把画布转成 PNG 一起送过去，服务端不重画。 */
+  exportDocx(id: string, images: Record<string, string[]>): Observable<Blob> {
+    return this.http.post(`/api/reports/${id}/export/docx`, { images },
+                          { responseType: 'blob' });
+  }
+
   job(jobId: string): Observable<Job> {
     return this.http.get<Job>(`/api/jobs/${jobId}`);
   }
