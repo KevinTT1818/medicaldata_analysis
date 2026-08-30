@@ -7,9 +7,9 @@ from __future__ import annotations
 
 import hashlib
 import json
+import logging
 import threading
 import time
-import traceback
 import uuid
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
@@ -25,11 +25,14 @@ from ..analyses import regression as _regression  # noqa: F401
 from ..analyses import survival as _survival      # noqa: F401
 from ..analyses import registry
 from ..analyses.base import AnalysisContext
+from ..config import MAX_RETAINED_JOBS
 from ..cohort import builder, filters
 from ..cohort import store as cohort_store
 from . import cache
 
 Status = Literal["pending", "running", "succeeded", "failed"]
+
+log = logging.getLogger("app.jobs")
 
 _POOL = ThreadPoolExecutor(max_workers=4, thread_name_prefix="analysis")
 _JOBS: dict[str, "Job"] = {}
@@ -99,26 +102,65 @@ def list_jobs(limit: int = 50) -> list[dict[str, Any]]:
     return [j.public() for j in jobs[:limit]]
 
 
+def _evict_locked() -> int:
+    """把最早结束的任务从内存表里丢掉，只保留 MAX_RETAINED_JOBS 条。
+
+    只淘汰已终结的任务 —— 运行中的丢掉会让前端的进度流查不到自己。
+    结果本来就有落盘缓存，丢掉内存副本不影响可复现，只是要重新提交一次。
+    必须在持有 _LOCK 的情况下调用。
+    """
+    if len(_JOBS) <= MAX_RETAINED_JOBS:
+        return 0
+    done = sorted(
+        (j for j in _JOBS.values() if j.status in ("succeeded", "failed")),
+        key=lambda j: j.finished_at or j.created_at,
+    )
+    drop = len(_JOBS) - MAX_RETAINED_JOBS
+    removed = 0
+    for job in done[:drop]:
+        del _JOBS[job.id]
+        removed += 1
+    if removed:
+        log.debug("任务表淘汰 %d 条，当前 %d 条", removed, len(_JOBS))
+    return removed
+
+
+def job_count() -> int:
+    with _LOCK:
+        return len(_JOBS)
+
+
 def _submit(kind: str, spec: dict[str, Any], fn) -> Job:
     """提交一个任务。fn 收到 (report, job) —— 直接传 job，
     不能靠调用方在 _submit 返回后再回填，那样工作线程可能已经跑完了。"""
     job = Job(id=uuid.uuid4().hex[:12], kind=kind, spec=spec, created_at=_now())
     with _LOCK:
         _JOBS[job.id] = job
+        _evict_locked()
+    log.info("提交 %s 任务 %s %s", kind, job.id, spec.get("analysis") or spec.get("dataset", ""))
 
     def report(stage: str, pct: float) -> None:
         job.stage, job.progress, job.version = stage, pct, job.version + 1
 
     def wrapped() -> None:
         job.status, job.stage, job.version = "running", "启动", job.version + 1
+        started = time.perf_counter()
         try:
             payload, warnings = fn(report, job)
             job.result, job.warnings = payload, warnings
             job.status, job.stage, job.progress = "succeeded", "完成", 1.0
+            log.info(
+                "任务 %s 完成  %.0fms%s%s", job.id, (time.perf_counter() - started) * 1000,
+                "  命中缓存" if job.cached else "",
+                f"  队列 {job.cohort_n}/{job.cohort_total} 例" if job.cohort_n is not None else "",
+            )
         except Exception as exc:                      # noqa: BLE001
             job.status, job.stage = "failed", "失败"
             job.error = f"{type(exc).__name__}: {exc}"
-            traceback.print_exc()
+            # exc_info：把栈留在日志里。原先是 traceback.print_exc()，
+            # 打到 stdout 且不带任务号，事后对不上是哪一次分析。
+            log.error("任务 %s 失败：%s", job.id, job.error,
+                      exc_info=True, extra={"spec": job.spec})
         finally:
             job.finished_at = _now()
             job.version += 1

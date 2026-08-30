@@ -5,9 +5,12 @@
 """
 from __future__ import annotations
 
+import logging
 import re
 
 from .. import store
+
+log = logging.getLogger("app.cdm")
 
 TABLES = ("person", "visit", "condition", "measurement", "drug", "outcome")
 
@@ -189,7 +192,7 @@ def init() -> None:
         conn.execute(DDL)
     added = migrate()
     if added:
-        print(f"[cdm] 已补列：{', '.join(added)}")
+        log.info("已补列：%s", ", ".join(added))
 
 
 def clear_dataset(dataset: str, conn=None) -> None:

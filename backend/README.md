@@ -16,6 +16,36 @@ python3 -m venv .venv && .venv/bin/pip install -r requirements.txt
 服务在 <http://localhost:8000>，交互式 API 文档在 `/docs`。
 前端 `ng serve` 已配 `proxy.conf.json`，把 `/api` 转到这里。
 
+## 配置
+
+全部通过环境变量，都有默认值，本机跑不用设任何一个。
+
+| 变量 | 默认 | 说明 |
+| --- | --- | --- |
+| `MEDDATA_API_KEY` | 空 | 设了就对 `/api/*` 强制校验 `X-API-Key` 请求头 |
+| `MEDDATA_DATA_DIR` | `./data` | 数据目录。DuckDB 是单写入者，测试靠它指向独立目录 |
+| `MEDDATA_RAW_DIR` | `$DATA_DIR/raw` | 原始文件目录，单独可覆盖好让测试复用已下载的数据 |
+| `MEDDATA_MAX_JOBS` | 200 | 内存任务表保留条数，超出淘汰最早结束的 |
+| `MEDDATA_LOG_LEVEL` | INFO | 日志级别 |
+
+### 访问控制
+
+不设 `MEDDATA_API_KEY` 时所有接口都是开放的 —— **任何能连上这个端口的人都可以
+删掉全部队列与报告、重新导入数据集、读走所有结果**。本机单人跑没问题，
+要给第二个人用就必须设上：
+
+```bash
+MEDDATA_API_KEY="$(python3 -c 'import secrets;print(secrets.token_urlsafe(32))')" ./run.sh
+```
+
+启动时会打一条告警提醒当前是哪种状态。前端在顶栏提供密钥输入框，
+只在服务器确实要求时出现 —— 它靠 `/api/health` 判断，那是唯一不设防的端点
+（否则会陷入「要密钥才能知道要不要密钥」）。
+
+密钥走请求头不走查询串，进度流也一样：SSE 因此没用 `EventSource`
+（它发不了自定义头），改成 `fetch` 读流。密钥落进 URL 就会进浏览器历史、
+代理日志和 Referer。
+
 ## 数据
 
 原始文件放 `data/raw/<dataset_id>/`，只读，永不修改 —— 这是可复现的前提。
@@ -370,7 +400,13 @@ outcome: str = Field(..., json_schema_extra=widgets.variable(
 .venv/bin/python -m unittest discover -s tests -v
 ```
 
+后端 296 例，前端 140 例（`npx ng test --watch=false`，在仓库根目录跑）。
+
 期望值全部来自对原始文件的独立手工核对或官方发布数字，不是从流水线输出反抄的。
+
+回归测试要能抓住它守的那个 bug 才算数。ETL 事务化与宽表改写的测试都做过验证：
+把修复退化回去，对应的测试会失败；前端的 6 个测试文件也用注入缺陷的方式
+逐条确认过（改平滑折线、改线性轴、分类色循环取模等 7 项，全部被抓住）。
 
 `tests/_env.py` 必须被每个测试模块**最先**导入。`app.config` 在一个进程里只导入
 一次，各测试文件各设各的 `MEDDATA_DATA_DIR` 的话只有第一个生效，其余文件拿到的路径
@@ -408,6 +444,12 @@ JSON Schema 驱动的参数表单、异步任务 + SSE、schema 迁移、
 报告组装 + 可复现核对 + 打印导出。前端有 KM 曲线、森林图、ROC、直方图/箱线图。
 
 万级样本（NHANES 9254 人）上端到端 50–75 ms，缓存命中 12 ms。
+MIMIC 全选 189 个变量跑一次 Table 1 是 490 ms。
+
+审计后补的：ETL 单事务原子替换（此前重新导入期间并发读会看到空表，
+然后基于空数据「正常」返回一个结果）、宽表按来源表分组的一次扫描
+（此前每变量一个 LEFT JOIN，189 个变量 10.9 秒且 EXPLAIN 会 OOM）、
+API 密钥校验、结构化日志、任务表淘汰、前端测试从 3 例补到 140 例。
 
 **未做**：
 

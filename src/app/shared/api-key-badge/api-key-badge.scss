@@ -1,0 +1,40 @@
+.api-key {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.api-key input {
+  width: 200px;
+  padding: 4px 8px;
+  font-family: var(--font-mono, monospace);
+  font-size: 12px;
+  color: var(--ink);
+  background: var(--surface);
+  border: 1px solid var(--rule-strong, var(--rule));
+  border-radius: 4px;
+}
+
+.btn-sm {
+  padding: 4px 10px;
+  font-size: 12px;
+}
+
+/* 要密钥却没填时所有请求都会 401，得让人一眼看到 */
+.is-missing {
+  color: var(--rose);
+  border-color: var(--rose);
+  background: var(--rose-wash, transparent);
+}
+
+.sr-only {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  padding: 0;
+  margin: -1px;
+  overflow: hidden;
+  clip: rect(0, 0, 0, 0);
+  white-space: nowrap;
+  border: 0;
+}

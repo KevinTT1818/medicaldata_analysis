@@ -32,3 +32,17 @@ MAX_VARIABLES_PER_ANALYSIS = 500
 # 被隐藏的数量会在 schema 响应里报出来。
 MIN_VARIABLE_COVERAGE = 0.05
 MIN_VARIABLE_PATIENTS = 2
+
+#: API 密钥。设了就对 /api/* 强制校验（/api/health 除外）。
+#: 留空时不校验，但启动会打一条醒目的告警 —— 只在本机单人用时才可以留空，
+#: 任何能连上这个端口的人都能删掉全部队列与报告、重新导入数据集。
+API_KEY = os.environ.get("MEDDATA_API_KEY", "").strip()
+
+#: 内存任务表最多保留多少条。超出后淘汰最早结束的任务（运行中的绝不淘汰）。
+#: 每条任务都挂着完整的结果 payload —— KM 曲线的 t / survival 数组可达数千点，
+#: 只增不减的话长期运行内存只会往上走。结果本来就有落盘缓存，
+#: 丢掉内存副本不影响可复现。
+MAX_RETAINED_JOBS = int(os.environ.get("MEDDATA_MAX_JOBS", "200"))
+
+#: 日志级别。
+LOG_LEVEL = os.environ.get("MEDDATA_LOG_LEVEL", "INFO").upper()
