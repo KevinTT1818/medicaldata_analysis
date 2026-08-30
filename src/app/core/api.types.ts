@@ -108,6 +108,8 @@ export interface BaselineRow {
   p: number | null;
   p_adj: number | null;
   test: string | null;
+  /** 缺失信息占比。仅多重插补时有值。 */
+  fmi: number | null;
   warnings: string[];
 }
 
@@ -125,6 +127,8 @@ export interface BaselineTableResult {
   weights_available: boolean;
   /** Kish 有效样本量：权重差异越大，有效信息越少。 */
   effective_n: number | null;
+  /** 多重插补的执行情况。默认按观测值统计时为 null。 */
+  imputation: ImputationReport | null;
   /** 抽样设计参数。加权时 p 值来自设计校正 Wald 检验，自由度就是这里的 df。 */
   design: {
     n_strata: number;

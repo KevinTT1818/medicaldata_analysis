@@ -145,3 +145,17 @@ thead .col-p {
   font-size: 12px;
   color: var(--muted);
 }
+
+.survey-note.is-impute {
+  background: var(--surface-2);
+  border-color: var(--rule-strong);
+  color: var(--ink-2);
+}
+
+.survey-note.is-impute .badge { color: var(--muted); }
+
+/* FMI 超过 0.3 意味着这一行很大程度上是插补模型给的，不是数据给的 */
+.fmi-high {
+  color: var(--amber);
+  font-weight: 700;
+}

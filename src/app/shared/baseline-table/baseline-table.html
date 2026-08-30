@@ -14,6 +14,12 @@
   </p>
 }
 
+@if (imputationNote(); as note) {
+  <p class="survey-note is-impute">
+    <span class="badge">已插补</span>{{ note }}
+  </p>
+}
+
 <div class="scroller">
   <table>
     <caption class="sr-only">
@@ -34,6 +40,9 @@
         @if (showTests()) {
           <th scope="col" class="col-num col-p">p</th>
           <th scope="col" class="col-num col-p">p<sub>校正</sub></th>
+          @if (hasFmi()) {
+            <th scope="col" class="col-num" title="缺失信息占比：该行有多少不确定性来自插补">FMI</th>
+          }
           <th scope="col">检验方法</th>
         }
       </tr>
@@ -49,6 +58,9 @@
           @if (showTests()) {
             <td class="col-num">{{ formatP(row.p) }}</td>
             <td class="col-num">{{ formatP(row.p_adj) }}</td>
+            @if (hasFmi()) {
+              <td class="col-num" [class.fmi-high]="(row.fmi ?? 0) > 0.3">{{ formatFmi(row.fmi) }}</td>
+            }
             <td class="col-test">{{ row.test ?? '—' }}</td>
           }
         </tr>
@@ -63,6 +75,9 @@
             @if (showTests()) {
               <td></td>
               <td></td>
+              @if (hasFmi()) {
+                <td></td>
+              }
               <td></td>
             }
           </tr>

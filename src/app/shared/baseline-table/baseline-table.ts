@@ -30,6 +30,24 @@ export class BaselineTable {
   readonly showTests = computed(() => this.hasGroups());
 
   /** 加权且带完整抽样设计时，把自由度亮出来 —— 它决定了 p 值有多可信。 */
+  readonly hasFmi = computed(() =>
+    this.result().rows.some((r) => r.fmi !== null && r.fmi !== undefined),
+  );
+
+  readonly imputationNote = computed(() => {
+    const report = this.result().imputation;
+    if (!report) return null;
+    return (
+      `多重插补 ${report.m} 份 × ${report.iterations} 轮，` +
+      `${report.imputed_rows} / ${report.total_rows} 行受影响。` +
+      `分类变量的例数是合并构成比换算回去的估计数。`
+    );
+  });
+
+  formatFmi(value: number | null | undefined): string {
+    return value === null || value === undefined ? '—' : value.toFixed(3);
+  }
+
   readonly designNote = computed(() => {
     const r = this.result();
     if (!r.weighted || !r.design) return null;

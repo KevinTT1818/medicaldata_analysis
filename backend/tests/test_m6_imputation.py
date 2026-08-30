@@ -374,3 +374,151 @@ class PoolingOnLogScaleTest(unittest.TestCase):
         rows = imputation.pool_effect_rows(fits, [FakeTerm()], 0.95, complete_df=100)
         # 对数尺度均值为 0 -> HR 应为 1，而不是算术平均 (0.5+2+1+1+1)/5 = 1.1
         self.assertAlmostEqual(rows[0]["estimate"], 1.0, places=10)
+
+
+class D2RuleTest(unittest.TestCase):
+    """合并检验统计量的 D2 规则。Rubin 规则是给参数估计的，检验统计量要另一套。"""
+
+    def test_identical_statistics_match_single_test(self):
+        from scipy import stats as sp
+        chi2, k = 10.0, 2
+        out = imputation.pool_test_statistic([chi2] * 5, k)
+        self.assertAlmostEqual(out["f"], chi2 / k, places=8)
+        self.assertAlmostEqual(out["p"], float(sp.chi2.sf(chi2, k)), places=8)
+
+    def test_disagreement_makes_p_more_conservative(self):
+        same = imputation.pool_test_statistic([10.0] * 5, 2)
+        varied = imputation.pool_test_statistic([4.0, 10.0, 16.0, 8.0, 12.0], 2)
+        self.assertGreater(varied["p"], same["p"])
+
+    def test_too_few_statistics_is_rejected(self):
+        out = imputation.pool_test_statistic([10.0], 2)
+        self.assertIsNone(out["p"])
+        self.assertIn("至少需要两份", out["detail"])
+
+    def test_wild_disagreement_refuses_rather_than_guesses(self):
+        """插补间差异极大时 D2 会算成负数，此时不该硬给一个 p。
+
+        取值要让「统计量均值除以自由度」小于「插补带来的额外变异项」：
+        四个自由度上大部分插补给出 0、只有一份给出 100，就是这种情形。
+        """
+        out = imputation.pool_test_statistic([0.0, 0.0, 0.0, 0.0, 100.0], 4)
+        self.assertIsNone(out["p"])
+        self.assertIn("差异过大", out["detail"])
+
+
+class BaselineTableImputationTest(unittest.TestCase):
+    MIMIC = "mimic_demo"
+    ALB = "measurement.LOINC:1751-6"
+    BILI = "measurement.LOINC:1975-2"
+    CREAT = "measurement.LOINC:2160-0"
+    SEX = "person.gender"
+    DEATH = "outcome.death"
+
+    @classmethod
+    def setUpClass(cls):
+        schema.init()
+        etl.import_dataset(cls.MIMIC)
+        cls.catalog = {v.id: v for v in builder.list_variables(cls.MIMIC)}
+
+    def _run(self, **params):
+        analysis = registry.get("describe.baseline_table")
+        parsed = analysis.Params(**params)
+        frame = builder.build_feature_frame(
+            self.MIMIC, analysis.required_variables(parsed))
+        return analysis.run(AnalysisContext(self.MIMIC, frame, self.catalog, parsed))
+
+    def test_default_is_observed_values(self):
+        """基线表的通行做法是报观测值并单列缺失数，默认不该偷偷插补。"""
+        out = self._run(variables=[AGE, self.ALB], group_by=self.DEATH).payload
+        self.assertIsNone(out["imputation"])
+        by_variable = {r["variable"]: r for r in out["rows"]}
+        self.assertEqual(by_variable[self.ALB]["n_missing"], 20)
+
+    def test_row_shape_is_stable_across_modes(self):
+        """两条路径的行必须有相同的键，前端才能按固定形状渲染。"""
+        observed = self._run(variables=[AGE, self.ALB],
+                             group_by=self.DEATH).payload["rows"]
+        imputed = self._run(variables=[AGE, self.ALB], group_by=self.DEATH,
+                            missing="multiple_imputation",
+                            n_imputations=3).payload["rows"]
+        for a, b in zip(observed, imputed):
+            self.assertEqual(set(a) - {"raw"}, set(b) - {"raw"})
+            self.assertIn("fmi", a)
+
+    def test_missing_counts_survive_imputation(self):
+        """插补后的宽表没有缺失了，但表里仍要显示原来缺了多少。"""
+        out = self._run(variables=[AGE, self.ALB, self.BILI], group_by=self.DEATH,
+                        missing="multiple_imputation", n_imputations=3).payload
+        by_variable = {r["variable"]: r["n_missing"] for r in out["rows"]}
+        self.assertEqual(by_variable[self.ALB], 20)
+        self.assertEqual(by_variable[self.BILI], 20)
+        self.assertEqual(by_variable[AGE], 0)
+
+    def test_variable_without_missing_keeps_its_p_value(self):
+        """FMI 趋近 0 时合并结果必须还原成原检验，否则合并规则就有问题。
+
+        残差来自 Barnard-Rubin 自由度公式在 λ→0 时的固有保守性，R 的 mice 同样如此。
+        """
+        variables = [AGE, self.ALB, self.BILI]
+        observed = self._run(variables=variables, group_by=self.DEATH,
+                             p_adjust="none").payload
+        imputed = self._run(variables=variables, group_by=self.DEATH,
+                            missing="multiple_imputation", n_imputations=5,
+                            p_adjust="none").payload
+        age_observed = next(r for r in observed["rows"] if r["variable"] == AGE)
+        age_imputed = next(r for r in imputed["rows"] if r["variable"] == AGE)
+        self.assertAlmostEqual(age_imputed["fmi"], 0.0, places=3)
+        self.assertAlmostEqual(age_imputed["p"], age_observed["p"], places=3)
+
+    def test_fmi_positive_for_variables_with_missing(self):
+        out = self._run(variables=[AGE, self.ALB, self.BILI], group_by=self.DEATH,
+                        missing="multiple_imputation", n_imputations=5).payload
+        by_variable = {r["variable"]: r["fmi"] for r in out["rows"]}
+        self.assertGreater(by_variable[self.ALB], by_variable[AGE])
+
+    def test_imputation_forces_means_over_medians(self):
+        """检验比的是均值，表里显示中位数读者对不上。"""
+        out = self._run(variables=[self.BILI], group_by=self.DEATH,
+                        missing="multiple_imputation", n_imputations=3).payload
+        self.assertEqual(out["rows"][0]["stat"], "mean_sd")
+
+    def test_two_group_continuous_uses_rubin_not_d2(self):
+        """两组连续变量能拿到均值差和方差，走 Rubin 比 D2 准。"""
+        out = self._run(variables=[self.ALB], group_by=self.DEATH,
+                        missing="multiple_imputation", n_imputations=3).payload
+        self.assertIn("Rubin", out["rows"][0]["test"])
+
+    def test_categorical_falls_back_to_d2(self):
+        """分类变量只有卡方统计量，拿不到干净的参数估计，只能退到 D2。
+
+        性别本身在 MIMIC 里没有缺失，所以要搭一个有缺失的变量把插补触发起来。
+        """
+        out = self._run(variables=[self.SEX, self.ALB], group_by=self.DEATH,
+                        missing="multiple_imputation", n_imputations=3).payload
+        sex_row = next(r for r in out["rows"] if r["variable"] == self.SEX)
+        self.assertIn("D2", sex_row["test"])
+
+    def test_notes_state_the_convention_tradeoff(self):
+        """两种做法都对，但别在同一篇里混用 —— 这话得说出来。"""
+        out = self._run(variables=[self.ALB], group_by=self.DEATH,
+                        missing="multiple_imputation", n_imputations=3).payload
+        self.assertTrue(any("通行做法" in n for n in out["notes"]))
+        self.assertTrue(any("D2" in n for n in out["notes"]))
+
+    def test_no_missing_skips_imputation_entirely(self):
+        out = self._run(variables=[AGE, self.CREAT], group_by=self.DEATH,
+                        missing="multiple_imputation", n_imputations=5).payload
+        self.assertIsNone(out["imputation"])
+        for row in out["rows"]:
+            self.assertIsNone(row["fmi"])
+
+    def test_categorical_counts_stay_plausible(self):
+        """插补后例数是构成比换算回去的估计数，仍应落在合理范围。"""
+        out = self._run(variables=[self.SEX], group_by=self.DEATH,
+                        missing="multiple_imputation", n_imputations=3).payload
+        for level in out["rows"][0]["levels"]:
+            text = level["cells"]["__overall__"]
+            count = int(text.split(" ")[0])
+            self.assertGreaterEqual(count, 0)
+            self.assertLessEqual(count, 100)

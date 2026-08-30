@@ -11,6 +11,7 @@ from scipy import stats
 
 from ..cdm import values
 from ..cohort.builder import PSU_COLUMN, STRATUM_COLUMN, Variable
+from . import imputation
 from . import survey
 from . import weights as W
 from .base import Analysis, AnalysisContext, AnalysisResult
@@ -100,13 +101,30 @@ def _continuous_row(
         q1, med, q3 = np.percentile(a, [25, 50, 75])
         return f"{_fmt(float(med), d)} ({_fmt(float(q1), d)}–{_fmt(float(q3), d)})"
 
+    def raw_masked(mask: np.ndarray) -> dict[str, Any] | None:
+        """单元格背后的数字。合并 m 份插补时用它，格式化字符串没法合并。"""
+        a = vals[mask]
+        if a.size == 0:
+            return None
+        if weighted and design is not None:
+            estimate = survey.domain_mean(vals, design, mask)
+            return {"mean": estimate.value, "var_mean": float(estimate.se**2),
+                    "sd": W.sd(a, sample_weights[mask]), "n": int(a.size)}  # type: ignore[index]
+        mean = float(np.mean(a))
+        sd = float(np.std(a, ddof=1)) if a.size > 1 else float("nan")
+        var_mean = float(sd**2 / a.size) if a.size > 1 else float("nan")
+        return {"mean": mean, "var_mean": var_mean, "sd": sd, "n": int(a.size)}
+
     cells = {OVERALL: describe_masked(valid)}
+    raw_cells: dict[str, Any] = {OVERALL: raw_masked(valid)}
     for label, mask in group_masks:
         cells[label] = describe_masked(mask & valid)
+        raw_cells[label] = raw_masked(mask & valid)
 
     p: float | None = None
     test: str | None = None
     warnings: list[str] = []
+    continuous_chi_square: dict[str, Any] | None = None
 
     # 加权时走设计校正的 Wald 检验：把统计量线性化后按层内 PSU 的离散度求方差。
     # 用未加权的 t 检验配加权的点估计是自相矛盾的，所以两条路互斥。
@@ -127,14 +145,40 @@ def _continuous_row(
                 p = float(stats.mannwhitneyu(*testable, alternative="two-sided").pvalue)
                 test = "Mann-Whitney U"
         else:
+            k = len(testable) - 1
             if normal:
-                p = float(stats.f_oneway(*testable).pvalue)
+                outcome = stats.f_oneway(*testable)
+                p = float(outcome.pvalue)
                 test = "单因素方差分析"
+                # F 乘以分子自由度近似服从卡方(k)，供 D2 合并用
+                continuous_chi_square = {"chi2": float(outcome.statistic) * k, "k": k}
             else:
-                p = float(stats.kruskal(*testable).pvalue)
+                outcome = stats.kruskal(*testable)
+                p = float(outcome.pvalue)
                 test = "Kruskal-Wallis"
+                # Kruskal 的 H 本身就近似卡方(k)
+                continuous_chi_square = {"chi2": float(outcome.statistic), "k": k}
     elif group_masks and not weighted and len(testable) != len(per_group):
         warnings.append("有分组样本量不足或方差为零，未做检验")
+
+    # 两组时把均值差和它的方差留出来：合并 m 份插补时走 Rubin 规则比 D2 准
+    contrast: dict[str, Any] | None = None
+    if len(group_masks) == 2:
+        first = raw_cells.get(group_masks[0][0])
+        second = raw_cells.get(group_masks[1][0])
+        if first and second and np.isfinite(first["var_mean"]) and np.isfinite(second["var_mean"]):
+            v1, v2 = first["var_mean"], second["var_mean"]
+            n1, n2 = first["n"], second["n"]
+            # Welch-Satterthwaite 自由度。合并时要把它交给 Barnard-Rubin，
+            # 否则 FMI 趋近 0 时会退化成 z 检验而不是原来的 t 检验。
+            welch_df = float("nan")
+            if n1 > 1 and n2 > 1 and (v1 + v2) > 0:
+                welch_df = (v1 + v2) ** 2 / (v1**2 / (n1 - 1) + v2**2 / (n2 - 1))
+            contrast = {
+                "diff": second["mean"] - first["mean"],
+                "var_diff": v1 + v2,
+                "df": welch_df,
+            }
 
     return {
         "variable": vid,
@@ -148,7 +192,11 @@ def _continuous_row(
         "p": p,
         "p_adj": None,
         "test": test,
+        # 未走插补时没有缺失信息占比，但键要在 —— 前端按固定形状渲染
+        "fmi": None,
         "warnings": warnings,
+        "raw": {"cells": raw_cells, "contrast": contrast,
+                "chi_square": continuous_chi_square, "digits": d},
     }
 
 
@@ -182,6 +230,21 @@ def _categorical_row(
         return f"{n} ({n / denom * 100:.1f})"
 
     all_mask = np.ones(frame.height, dtype=bool)
+    def raw_cell(mask: np.ndarray, level: str) -> dict[str, Any] | None:
+        sel = mask & notnull
+        denom = int(sel.sum())
+        if denom == 0:
+            return None
+        count = int((arr[sel] == level).sum())
+        if weighted and sample_weights is not None:
+            proportion = W.proportion(arr[sel] == level, sample_weights[sel])
+        else:
+            proportion = count / denom
+        # 构成比的抽样方差，合并时用
+        variance = proportion * (1 - proportion) / denom if denom else float("nan")
+        return {"proportion": float(proportion), "var": float(variance),
+                "count": count, "denom": denom}
+
     level_rows = [
         {
             "label": lv,
@@ -190,10 +253,16 @@ def _categorical_row(
         }
         for lv in shown
     ]
+    raw_levels = {
+        lv: {OVERALL: raw_cell(all_mask, lv),
+             **{label: raw_cell(mask, lv) for label, mask in group_masks}}
+        for lv in shown
+    }
 
     p: float | None = None
     test: str | None = None
     warnings: list[str] = []
+    chi_square: dict[str, Any] | None = None
 
     if weighted and design is not None and group_masks and len(levels) >= 2:
         outcome = survey.categorical_wald_test(
@@ -212,6 +281,7 @@ def _categorical_row(
 
         if table.shape[0] >= 2 and table.shape[1] >= 2:
             res = stats.chi2_contingency(table)
+            chi_square = {"chi2": float(res.statistic), "k": int(res.dof)}
             min_expected = float(res.expected_freq.min())
             if min_expected < 5:
                 if table.shape == (2, 2):
@@ -239,8 +309,126 @@ def _categorical_row(
         "p": p,
         "p_adj": None,
         "test": test,
+        "fmi": None,
         "warnings": warnings,
+        "raw": {"levels": raw_levels, "chi_square": chi_square, "shown": shown},
     }
+
+
+# ---------------------------------------------------------------- 合并 m 份插补
+
+def _pool_continuous(variants: list[dict[str, Any]], m: int) -> dict[str, Any]:
+    """合并一个连续变量在 m 份插补上的结果。"""
+    base = dict(variants[0])
+    digits = variants[0]["raw"]["digits"]
+    keys = list(variants[0]["raw"]["cells"])
+
+    cells: dict[str, str] = {}
+    for key in keys:
+        raw = [v["raw"]["cells"].get(key) for v in variants]
+        usable = [r for r in raw if r and np.isfinite(r["mean"])]
+        if not usable:
+            cells[key] = "—"
+            continue
+        pooled = imputation.pool(
+            [r["mean"] for r in usable],
+            [r["var_mean"] for r in usable],
+            complete_df=float(np.mean([r["n"] for r in usable])) - 1,
+        )
+        # 标准差是人群离散度，不是估计量的不确定性，取各份平均即可
+        sd = float(np.nanmean([r["sd"] for r in usable]))
+        cells[key] = f"{_fmt(pooled.estimate, digits)} ± {_fmt(sd, digits)}"
+
+    p_value, fmi, test = _pool_p(variants, m)
+    base.update(
+        cells=cells,
+        # 插补后一律报均值：检验比的是均值，显示中位数读者对不上
+        stat="mean_sd",
+        p=p_value, p_adj=None, test=test, fmi=fmi,
+        warnings=[w for v in variants for w in v["warnings"]][:1],
+    )
+    base.pop("raw", None)
+    return base
+
+
+def _pool_categorical(variants: list[dict[str, Any]], m: int) -> dict[str, Any]:
+    """合并一个分类变量在 m 份插补上的结果。"""
+    base = dict(variants[0])
+    shown = variants[0]["raw"]["shown"]
+    keys = list(next(iter(variants[0]["raw"]["levels"].values())))
+
+    level_rows = []
+    fmis: list[float] = []
+    for level in shown:
+        cells: dict[str, str] = {}
+        for key in keys:
+            raw = [v["raw"]["levels"][level].get(key) for v in variants]
+            usable = [r for r in raw if r]
+            if not usable:
+                cells[key] = "—"
+                continue
+            pooled = imputation.pool(
+                [r["proportion"] for r in usable],
+                [r["var"] for r in usable],
+                complete_df=float(np.mean([r["denom"] for r in usable])) - 1,
+            )
+            fmis.append(pooled.fmi)
+            denom = float(np.mean([r["denom"] for r in usable]))
+            # 插补后例数不再是整数观测，这里给的是合并构成比换算回去的估计数
+            count = int(round(pooled.estimate * denom))
+            cells[key] = f"{count} ({pooled.estimate * 100:.1f})"
+        level_rows.append({"label": level, "cells": cells})
+
+    p_value, _, test = _pool_p(variants, m)
+    base.update(
+        levels=level_rows, cells={},
+        p=p_value, p_adj=None, test=test,
+        fmi=round(max(fmis), 4) if fmis else None,
+        warnings=[w for v in variants for w in v["warnings"]][:1],
+    )
+    base.pop("raw", None)
+    return base
+
+
+def _pool_p(variants: list[dict[str, Any]], m: int) -> tuple[float | None, float | None, str | None]:
+    """合并 p 值。
+
+    两组连续变量能拿到均值差和它的方差，走 Rubin 规则（更准）；
+    其余情形只有检验统计量，退到 D2 规则。
+    """
+    contrasts = [v["raw"].get("contrast") for v in variants]
+    if all(c is not None for c in contrasts):
+        # 传完整数据自由度，Barnard-Rubin 才能在 FMI 趋近 0 时还原成原检验
+        complete_df = float(np.nanmean([c.get("df", np.nan) for c in contrasts]))
+        pooled = imputation.pool(
+            [c["diff"] for c in contrasts],
+            [c["var_diff"] for c in contrasts],
+            complete_df=complete_df if np.isfinite(complete_df) else None,
+        )
+        return pooled.p, round(pooled.fmi, 4), "合并 t 检验（Rubin）"
+
+    chi_squares = [v["raw"].get("chi_square") for v in variants]
+    if all(c is not None for c in chi_squares):
+        k = chi_squares[0]["k"]
+        outcome = imputation.pool_test_statistic(
+            [c["chi2"] for c in chi_squares], k, m
+        )
+        if outcome["p"] is not None:
+            return outcome["p"], None, "合并 Wald 检验（D2）"
+    return None, None, None
+
+
+def _pool_rows(
+    per_imputation: list[list[dict[str, Any]]], m: int
+) -> list[dict[str, Any]]:
+    pooled: list[dict[str, Any]] = []
+    for index in range(len(per_imputation[0])):
+        variants = [batch[index] for batch in per_imputation]
+        if variants[0]["kind"] == "continuous":
+            pooled.append(_pool_continuous(variants, m))
+        else:
+            pooled.append(_pool_categorical(variants, m))
+    return pooled
 
 
 # ---------------------------------------------------------------- 算子
@@ -268,6 +456,19 @@ class BaselineTable(Analysis):
                 "weighted": "强制加权",
                 "unweighted": "不加权（仅描述样本）",
             }})
+        missing: Literal["observed", "multiple_imputation"] = Field(
+            "observed", title="缺失值处理",
+            description=(
+                "默认按观测值逐变量统计并单列缺失数，这是基线表的通行做法；"
+                "选插补可让分母与模型口径一致"
+            ),
+            json_schema_extra={"x-enum-labels": {
+                "observed": "观测值（逐变量剔除，缺失数单列）",
+                "multiple_imputation": "多重插补（与模型口径一致）",
+            }})
+        n_imputations: int = Field(
+            5, ge=2, le=20, title="插补份数",
+            description="仅在选多重插补时有效")
         p_adjust: Literal["none", "bonferroni", "fdr_bh"] = Field(
             "fdr_bh", title="多重比较校正",
             description="一次做几十个检验时必须校正，否则假阳性必然出现",
@@ -323,17 +524,60 @@ class BaselineTable(Analysis):
                 })
 
         analysis_vars = [v for v in p.variables if v != p.group_by]
-        rows: list[dict[str, Any]] = []
 
-        for i, vid in enumerate(analysis_vars):
-            ctx.progress(f"计算 {ctx.catalog[vid].label}", 0.1 + 0.8 * i / max(len(analysis_vars), 1))
-            v = ctx.catalog[vid]
-            if v.kind == "continuous":
-                rows.append(_continuous_row(
-                    frame, vid, v, group_masks, p.normality_alpha, use_weights, design))
-            else:
-                rows.append(_categorical_row(
-                    frame, vid, v, group_masks, use_weights, design))
+        # 插补路径：在 m 份补全数据上各算一遍，再合并
+        impute_report = None
+        if p.missing == "multiple_imputation":
+            ctx.progress("多重插补", 0.05)
+            try:
+                frames, impute_report = imputation.prepare_frames(
+                    frame, ctx.catalog, analysis_vars, p.missing, p.n_imputations
+                )
+            except imputation.ImputationError as exc:
+                raise ValueError(str(exc)) from exc
+        else:
+            frames = [frame]
+
+        def build(source: pl.DataFrame) -> list[dict[str, Any]]:
+            out: list[dict[str, Any]] = []
+            for vid in analysis_vars:
+                v = ctx.catalog[vid]
+                if v.kind == "continuous":
+                    out.append(_continuous_row(
+                        source, vid, v, group_masks, p.normality_alpha,
+                        use_weights, design))
+                else:
+                    out.append(_categorical_row(
+                        source, vid, v, group_masks, use_weights, design))
+            return out
+
+        if impute_report is None:
+            rows = []
+            for i, vid in enumerate(analysis_vars):
+                ctx.progress(f"计算 {ctx.catalog[vid].label}",
+                             0.1 + 0.8 * i / max(len(analysis_vars), 1))
+                v = ctx.catalog[vid]
+                if v.kind == "continuous":
+                    rows.append(_continuous_row(
+                        frame, vid, v, group_masks, p.normality_alpha,
+                        use_weights, design))
+                else:
+                    rows.append(_categorical_row(
+                        frame, vid, v, group_masks, use_weights, design))
+        else:
+            per_imputation = []
+            for index, source in enumerate(frames):
+                ctx.progress(f"统计第 {index + 1}/{len(frames)} 份插补",
+                             0.15 + 0.6 * index / max(len(frames), 1))
+                per_imputation.append(build(source))
+            ctx.progress("按 Rubin 规则合并", 0.8)
+            rows = _pool_rows(per_imputation, len(frames))
+            # 插补后的宽表已无缺失，缺失数要从插补报告里取回来
+            missing_by_variable = {
+                c["variable"]: c["n_missing"] for c in impute_report["columns"]
+            }
+            for row in rows:
+                row["n_missing"] = missing_by_variable.get(row["variable"], 0)
 
         # --- 多重比较校正 ---
         idx = [i for i, r in enumerate(rows) if r["p"] is not None]
@@ -347,6 +591,30 @@ class BaselineTable(Analysis):
                 rows[i]["p_adj"] = float(a)
 
         notes: list[str] = []
+
+        if impute_report is not None:
+            notes.append(
+                f"缺失值用链式方程多重插补（{impute_report['m']} 份 × "
+                f"{impute_report['iterations']} 轮），各单元格按 Rubin 规则合并。"
+                f"分类变量的例数是合并构成比换算回去的估计数，不再是整数观测。"
+            )
+            notes.append(
+                "两组连续变量的 p 值走 Rubin 合并（有均值差和方差，更准）；"
+                "分类变量与多组比较只有检验统计量，退到 D2 规则。"
+                "秩检验与 Fisher 精确检验没有公认的合并方式，插补时不使用。"
+            )
+            notes.append(
+                "基线表的通行做法是报观测值并单列缺失数 —— 读者想知道实际测到了什么。"
+                "这里选了插补，好处是分母与模型口径一致，代价是表里的数字不再全是"
+                "直接观测到的。两种都对，别在同一篇里混用。"
+            )
+            heavy = [c for c in impute_report["columns"] if c["pct"] > 40]
+            if heavy:
+                names = "、".join(ctx.catalog[c["variable"]].label for c in heavy)
+                analysis_warnings.append(
+                    f"这些变量缺失超过 40%：{names}。表里相应的数字有很大一部分"
+                    f"是插补模型给的 —— 看 FMI 列。"
+                )
 
         if weighted:
             notes.append(
@@ -405,6 +673,7 @@ class BaselineTable(Analysis):
                 "p_adjust": p.p_adjust,
                 "weighted": weighted,
                 "weights_available": available,
+                "imputation": impute_report,
                 "effective_n": (
                     round(W.effective_n(use_weights), 1) if weighted else None
                 ),

@@ -349,3 +349,42 @@ def pool_effect_rows(
             "fmi": round(pooled.fmi, 4),
         })
     return rows
+
+
+def pool_test_statistic(
+    statistics: list[float], k: int, m: int | None = None
+) -> dict[str, Any]:
+    """合并 m 份插补上的检验统计量（Li-Meng-Raghunathan-Rubin 的 D2 规则）。
+
+    Rubin 规则是给**参数估计**的：有点估计也有方差，能算组间方差。
+    检验统计量没有这些，只能用另一套：D2 把 m 个卡方统计量合成一个 F。
+
+    D2 的精度不如「先合并参数估计再检验」（D1），所以两组均值比较那种能拿到
+    差值和方差的情形仍走 Rubin；只有分类变量的卡方、多组比较这类拿不到
+    干净参数估计的，才退到 D2。
+    """
+    values = np.asarray([s for s in statistics if np.isfinite(s) and s >= 0])
+    m = m or values.size
+    if values.size < 2 or k < 1:
+        return {"p": None, "detail": "合并检验至少需要两份有效统计量"}
+
+    mean_stat = float(values.mean())
+    # r 衡量插补带来的额外变异，用 sqrt 尺度更稳（卡方是右偏的）
+    r = (1 + 1 / m) * float(np.var(np.sqrt(values), ddof=1))
+    denominator = 1 + r
+    if denominator <= 0:
+        return {"p": None, "detail": "合并后的方差非正"}
+
+    d2 = (mean_stat / k - (m - 1) / (m + 1) * r) / denominator
+    if not np.isfinite(d2) or d2 < 0:
+        # 插补间差异过大时 D2 可能算成负数，此时不给 p 值而不是给个假的
+        return {"p": None, "detail": "各份插补的检验结果差异过大，合并统计量不可用"}
+
+    if r <= 0:
+        nu = float("inf")
+    else:
+        nu = k ** (-3 / m) * (m - 1) * (1 + 1 / r) ** 2
+
+    p = float(stats.f.sf(d2, k, nu)) if np.isfinite(nu) else float(stats.chi2.sf(d2 * k, k))
+    return {"p": p, "f": round(d2, 4), "df_num": k,
+            "df_den": None if not np.isfinite(nu) else round(nu, 1), "detail": None}
