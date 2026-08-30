@@ -296,3 +296,56 @@ def pool(
         ci_low=Q - t_crit * se, ci_high=Q + t_crit * se,
         p=p, fmi=lam,
     )
+
+
+def prepare_frames(
+    frame: pl.DataFrame,
+    catalog: dict[str, Variable],
+    variable_ids: list[str],
+    mode: str,
+    m: int,
+) -> tuple[list[pl.DataFrame], dict[str, Any] | None]:
+    """按缺失处理方式准备待拟合的数据。
+
+    选完全病例就原样返回一份；选多重插补就返回 m 份，外加一份插补说明。
+    本来就没有缺失时退回单份，不白跑 m 次。
+    """
+    if mode != "multiple_imputation":
+        return [frame], None
+
+    frames, report = impute(frame, catalog, variable_ids, m=m)
+    if report.get("skipped"):
+        return [frame], None
+    return frames, report
+
+
+def pool_effect_rows(
+    fits: list[dict[str, Any]],
+    terms: list[Any],
+    conf_level: float,
+    complete_df: float | None,
+    offset: int = 0,
+) -> list[dict[str, Any]]:
+    """把 m 次拟合的系数按 Rubin 规则合并成一组效应量。
+
+    合并在**对数尺度**上做 —— HR 与 OR 的抽样分布在对数尺度上才近似正态，
+    直接对比值求平均会有偏。合并完再指数回去。
+
+    offset 是系数数组里协变量的起始下标：logistic 有截距所以是 1，Cox 没有所以是 0。
+    """
+    rows = []
+    for i, term in enumerate(terms):
+        estimates = [float(f["beta"][i + offset]) for f in fits]
+        variances = [float(f["se"][i + offset]) ** 2 for f in fits]
+        pooled = pool(estimates, variances, conf_level, complete_df)
+        rows.append({
+            "label": term.label,
+            "variable": term.variable,
+            "reference": term.reference,
+            "estimate": float(np.exp(pooled.estimate)),
+            "ci_lower": float(np.exp(pooled.ci_low)),
+            "ci_upper": float(np.exp(pooled.ci_high)),
+            "p": pooled.p,
+            "fmi": round(pooled.fmi, 4),
+        })
+    return rows

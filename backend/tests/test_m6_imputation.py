@@ -254,3 +254,123 @@ class LogisticWithImputationTest(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class CoxWithImputationTest(unittest.TestCase):
+    """Cox 接入多重插补。MIMIC 上白蛋白与总胆红素各缺 20%，是真实的缺失。"""
+
+    MIMIC = "mimic_demo"
+    ALB = "measurement.LOINC:1751-6"
+    BILI = "measurement.LOINC:1975-2"
+    CREAT = "measurement.LOINC:2160-0"
+    DEATH = "outcome.death"
+
+    @classmethod
+    def setUpClass(cls):
+        schema.init()
+        etl.import_dataset(cls.MIMIC)
+        cls.catalog = {v.id: v for v in builder.list_variables(cls.MIMIC)}
+
+    def _run(self, **params):
+        analysis = registry.get("survival.cox")
+        parsed = analysis.Params(**params)
+        frame = builder.build_feature_frame(
+            self.MIMIC, analysis.required_variables(parsed))
+        return analysis.run(AnalysisContext(self.MIMIC, frame, self.catalog, parsed))
+
+    def _covariates(self):
+        return [AGE, self.ALB, self.BILI, self.CREAT]
+
+    def test_imputation_recovers_dropped_rows(self):
+        complete = self._run(outcome=self.DEATH, covariates=self._covariates(),
+                             missing="complete_case").payload
+        imputed = self._run(outcome=self.DEATH, covariates=self._covariates(),
+                            missing="multiple_imputation", n_imputations=3).payload
+        self.assertEqual(complete["n_used"], 76)
+        self.assertEqual(imputed["n_used"], 100)
+        self.assertEqual(imputed["n_dropped"], 0)
+
+    def test_survival_outcome_is_never_imputed(self):
+        """随访时长与事件标志不插补 —— 补结局等于把答案编出来。"""
+        out = self._run(outcome=self.DEATH, covariates=self._covariates(),
+                        missing="multiple_imputation", n_imputations=3).payload
+        imputed_variables = {c["variable"] for c in out["imputation"]["columns"]}
+        self.assertNotIn(self.DEATH, imputed_variables)
+        self.assertTrue(any("不插补" in n for n in out["notes"]))
+
+    def test_fmi_reflects_how_well_a_variable_is_predicted(self):
+        """FMI 不只看缺失率，还看这个变量被别的变量预测得有多准。
+
+        白蛋白与总胆红素同样缺 20%，但白蛋白更难预测，
+        各份插补间的系数波动更大，FMI 也就更高。
+        """
+        out = self._run(outcome=self.DEATH, covariates=self._covariates(),
+                        missing="multiple_imputation", n_imputations=5).payload
+        by_variable = {r["variable"]: r["fmi"] for r in out["rows"]}
+        # 不缺失的变量 FMI 应当接近 0
+        self.assertLess(by_variable[AGE], 0.05)
+        self.assertLess(by_variable[self.CREAT], 0.05)
+        # 缺失的变量 FMI 明显更高
+        self.assertGreater(by_variable[self.ALB], by_variable[AGE])
+
+    def test_hazard_ratios_stay_close(self):
+        """插补不该把结论翻过来。"""
+        complete = self._run(outcome=self.DEATH, covariates=self._covariates(),
+                             missing="complete_case").payload
+        imputed = self._run(outcome=self.DEATH, covariates=self._covariates(),
+                            missing="multiple_imputation", n_imputations=5).payload
+        for a, b in zip(complete["rows"], imputed["rows"]):
+            self.assertAlmostEqual(a["estimate"], b["estimate"], delta=0.05)
+
+    def test_ph_test_reports_strictest_across_imputations(self):
+        """多份插补没有公认的 p 值合并方式，诊断用途上取最严的那份。"""
+        out = self._run(outcome=self.DEATH, covariates=self._covariates(),
+                        missing="multiple_imputation", n_imputations=3,
+                        check_ph=True).payload
+        self.assertEqual(len(out["ph_test"]), 4)
+        for entry in out["ph_test"]:
+            self.assertGreaterEqual(entry["p"], 0.0)
+            self.assertLessEqual(entry["p"], 1.0)
+
+    def test_concordance_is_averaged_across_imputations(self):
+        out = self._run(outcome=self.DEATH, covariates=self._covariates(),
+                        missing="multiple_imputation", n_imputations=3).payload
+        self.assertGreater(out["concordance"], 0.5)
+        self.assertLess(out["concordance"], 1.0)
+        self.assertTrue(any("C-index" in n for n in out["notes"]))
+
+    def test_complete_case_warns_on_heavy_loss(self):
+        result = self._run(outcome=self.DEATH, covariates=self._covariates(),
+                           missing="complete_case")
+        self.assertTrue(any("选择偏倚" in w for w in result.warnings))
+
+    def test_no_missing_covariates_skips_imputation(self):
+        out = self._run(outcome=self.DEATH, covariates=[AGE, self.CREAT],
+                        missing="multiple_imputation", n_imputations=5).payload
+        self.assertIsNone(out["imputation"])
+        for row in out["rows"]:
+            self.assertIsNone(row["fmi"])
+
+
+class PoolingOnLogScaleTest(unittest.TestCase):
+    """合并必须在对数尺度上做。"""
+
+    def test_pooled_effect_is_geometric_not_arithmetic(self):
+        """HR / OR 的抽样分布在对数尺度才近似正态，直接对比值求平均会有偏。"""
+        from dataclasses import dataclass
+
+        @dataclass
+        class FakeTerm:
+            label: str = "x"
+            variable: str = "v"
+            reference: str | None = None
+            column: str = "v"
+
+        # 对数系数 ±ln(2)：对应 HR 0.5 与 2.0
+        betas = [np.log(0.5), np.log(2.0), 0.0, 0.0, 0.0]
+        fits = [
+            {"beta": np.array([b]), "se": np.array([0.2])} for b in betas
+        ]
+        rows = imputation.pool_effect_rows(fits, [FakeTerm()], 0.95, complete_df=100)
+        # 对数尺度均值为 0 -> HR 应为 1，而不是算术平均 (0.5+2+1+1+1)/5 = 1.1
+        self.assertAlmostEqual(rows[0]["estimate"], 1.0, places=10)

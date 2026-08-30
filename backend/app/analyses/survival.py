@@ -1,7 +1,7 @@
 """生存分析算子：Kaplan-Meier 曲线、Cox 比例风险模型。"""
 from __future__ import annotations
 
-from typing import Any
+from typing import Any, Literal
 
 import numpy as np
 import pandas as pd
@@ -15,6 +15,7 @@ from . import weights as W
 from ..cohort.builder import TIME_SUFFIX, Variable
 from .base import Analysis, AnalysisContext, AnalysisResult
 from .design import DesignError, build_design
+from . import imputation
 from .registry import register
 from . import widgets
 
@@ -173,6 +174,16 @@ class CoxRegression(Analysis):
                                   description="HR 置信区间的覆盖概率")
         check_ph: bool = Field(True, title="检验比例风险假设",
                                description="不满足时 HR 不能按恒定风险比解读")
+        missing: Literal["complete_case", "multiple_imputation"] = Field(
+            "complete_case", title="缺失值处理",
+            description="完全病例会丢人且可能引入偏倚；多重插补把插补的不确定性算进区间",
+            json_schema_extra={"x-enum-labels": {
+                "complete_case": "完全病例（剔除有缺失的行）",
+                "multiple_imputation": "多重插补（MICE + Rubin 合并）",
+            }})
+        n_imputations: int = Field(
+            5, ge=2, le=20, title="插补份数",
+            description="仅在选多重插补时有效。份数越多合并越稳，代价是更慢")
 
     def required_variables(self, params: BaseModel) -> list[str]:
         out = list(params.covariates)  # type: ignore[attr-defined]
@@ -183,66 +194,93 @@ class CoxRegression(Analysis):
     def run(self, ctx: AnalysisContext) -> AnalysisResult:
         p: CoxRegression.Params = ctx.params  # type: ignore[assignment]
         duration, event = _survival_inputs(ctx, p.outcome)
-
         covariates = [c for c in p.covariates if c != p.outcome]
-        design, terms, complete = build_design(ctx.frame, ctx.catalog, covariates)
 
-        usable = complete & np.isfinite(duration) & np.isfinite(event) & (duration > 0)
-        n_dropped = int((~usable).sum())
-        if usable.sum() < len(terms) + 2:
-            raise DesignError("完整病例数太少，不足以估计这个模型")
+        # 随访时长与事件标志缺失的行不能插补 —— 那等于把结局编出来
+        survival_ok = np.isfinite(duration) & np.isfinite(event) & (duration > 0)
 
-        df = design[usable].copy()
-        df["__T"] = duration[usable]
-        df["__E"] = event[usable]
+        ctx.progress("准备数据", 0.15)
+        try:
+            frames, impute_report = imputation.prepare_frames(
+                ctx.frame, ctx.catalog, covariates, p.missing, p.n_imputations
+            )
+        except imputation.ImputationError as exc:
+            raise DesignError(str(exc)) from exc
 
-        ctx.progress("拟合 Cox 模型", 0.5)
-        fitter = CoxPHFitter(alpha=1 - p.conf_level)
-        fitter.fit(df, duration_col="__T", event_col="__E")
-        summary = fitter.summary
+        fits: list[dict[str, Any]] = []
+        terms: list[Any] = []
+        for index, frame in enumerate(frames):
+            ctx.progress(
+                f"拟合 Cox 模型 {index + 1}/{len(frames)}"
+                if len(frames) > 1 else "拟合 Cox 模型",
+                0.3 + 0.45 * index / max(len(frames), 1),
+            )
+            fits.append(self._fit_once(ctx, frame, duration, event, survival_ok,
+                                       covariates, p))
+            terms = fits[-1]["terms"]
 
-        # 列名带置信水平（如 "exp(coef) lower 95%"），会随 alpha 变，按前缀匹配
-        lo_col = next(c for c in summary.columns if c.startswith("exp(coef) lower"))
-        hi_col = next(c for c in summary.columns if c.startswith("exp(coef) upper"))
+        primary = fits[0]
+        alpha = 1 - p.conf_level
 
-        rows = [
-            {
-                "label": t.label,
-                "variable": t.variable,
-                "reference": t.reference,
-                "estimate": float(summary.loc[t.column, "exp(coef)"]),
-                "ci_lower": float(summary.loc[t.column, lo_col]),
-                "ci_upper": float(summary.loc[t.column, hi_col]),
-                "p": float(summary.loc[t.column, "p"]),
-            }
-            for t in terms
-        ]
+        if len(fits) > 1:
+            ctx.progress("按 Rubin 规则合并", 0.85)
+            rows = imputation.pool_effect_rows(
+                fits, terms, p.conf_level, primary["df"], offset=0
+            )
+        else:
+            rows = [
+                {
+                    "label": t.label, "variable": t.variable, "reference": t.reference,
+                    **primary["coefficient"](i, alpha),
+                    "fmi": None,
+                }
+                for i, t in enumerate(terms)
+            ]
 
-        ph_warnings: list[str] = []
-        ph_rows: list[dict[str, Any]] = []
-        if p.check_ph:
-            ctx.progress("检验比例风险假设", 0.8)
-            ph = proportional_hazard_test(fitter, df, time_transform="rank")
-            label_of = {t.column: t.label for t in terms}
-            for column, row in ph.summary.iterrows():
-                key = column[0] if isinstance(column, tuple) else column
-                pv = float(row["p"])
-                ph_rows.append({"label": label_of.get(key, str(key)), "p": pv})
-                if pv < 0.05:
-                    ph_warnings.append(
-                        f"「{label_of.get(key, key)}」不满足比例风险假设（p={pv:.3f}），"
-                        f"该项的 HR 不宜按恒定风险比解读"
-                    )
+        ph_rows, ph_warnings = self._pooled_ph(fits, terms, p.check_ph, ctx)
+
+        n_used = primary["n_used"]
+        n_dropped = primary["n_dropped"]
+        n_events = primary["n_events"]
 
         notes = [
-            f"共 {int(usable.sum())} 例进入模型，{int(event[usable].sum())} 例发生事件。",
+            f"共 {n_used} 例进入模型，{n_events} 例发生事件。",
             "分类变量用哑变量编码，参照组在行标签中标出。",
         ]
-        if n_dropped:
+        analysis_warnings = list(ph_warnings)
+
+        if impute_report is not None:
             notes.append(
-                f"因协变量缺失剔除 {n_dropped} 例（complete-case）。"
-                f"缺失比例较高时应考虑多重插补。"
+                f"协变量缺失用链式方程多重插补（{impute_report['m']} 份 × "
+                f"{impute_report['iterations']} 轮），各系数在对数尺度上按 Rubin 规则"
+                f"合并 —— HR 的抽样分布在对数尺度才近似正态，直接对比值求平均会有偏。"
             )
+            notes.append(
+                "随访时长与事件标志不插补：补协变量可以，补结局等于把答案编出来。"
+            )
+            notes.append(
+                "多重插补假定数据「随机缺失」。若某个亚组的该变量是按设计不采集的，"
+                "插补只是在外推。"
+            )
+            heavy = [c for c in impute_report["columns"] if c["pct"] > 40]
+            if heavy:
+                names = "、".join(ctx.catalog[c["variable"]].label for c in heavy)
+                analysis_warnings.append(
+                    f"这些变量缺失超过 40%：{names}。结论有很大一部分是插补模型给的 —— "
+                    f"看每个系数的 FMI。"
+                )
+        elif n_dropped:
+            notes.append(f"因协变量缺失剔除 {n_dropped} 例（complete-case）。")
+            if n_dropped / max(n_used + n_dropped, 1) > 0.1:
+                analysis_warnings.append(
+                    f"完全病例分析丢掉了 {n_dropped} 例"
+                    f"（{n_dropped / (n_used + n_dropped) * 100:.0f}%）。"
+                    f"缺失通常不是随机的，这会引入选择偏倚 —— 可改用多重插补。"
+                )
+
+        concordance = float(np.mean([f["concordance"] for f in fits]))
+        if len(fits) > 1:
+            notes.append(f"C-index 取 {len(fits)} 份插补的平均。")
 
         return AnalysisResult(
             kind=self.result_kind,
@@ -254,11 +292,93 @@ class CoxRegression(Analysis):
                 "conf_level": p.conf_level,
                 "rows": rows,
                 "ph_test": ph_rows,
-                "n_used": int(usable.sum()),
-                "n_events": int(event[usable].sum()),
+                "imputation": impute_report,
+                "n_used": n_used,
+                "n_events": n_events,
                 "n_dropped": n_dropped,
-                "concordance": float(fitter.concordance_index_),
+                "concordance": concordance,
                 "notes": notes,
             },
-            warnings=ph_warnings + W.warn_if_survey_data(ctx.frame),
+            warnings=(
+                analysis_warnings if impute_report is not None
+                else analysis_warnings + W.warn_if_survey_data(ctx.frame)
+            ),
         )
+
+    def _fit_once(self, ctx, frame, duration, event, survival_ok,
+                  covariates, params) -> dict[str, Any]:
+        """在一份（可能是插补后的）数据上拟合一次 Cox 模型。"""
+        matrix, terms, complete = build_design(frame, ctx.catalog, covariates)
+        usable = complete & survival_ok
+        n_dropped = int((~usable).sum())
+        if usable.sum() < len(terms) + 2:
+            raise DesignError("完整病例数太少，不足以估计这个模型")
+
+        table = matrix[usable].copy()
+        table["__T"] = duration[usable]
+        table["__E"] = event[usable]
+
+        fitter = CoxPHFitter(alpha=1 - params.conf_level)
+        fitter.fit(table, duration_col="__T", event_col="__E")
+        summary = fitter.summary
+
+        beta = np.array([float(summary.loc[t.column, "coef"]) for t in terms])
+        se = np.array([float(summary.loc[t.column, "se(coef)"]) for t in terms])
+
+        # 列名带置信水平（如 "exp(coef) lower 95%"），会随 alpha 变，按前缀匹配
+        lo_col = next(c for c in summary.columns if c.startswith("exp(coef) lower"))
+        hi_col = next(c for c in summary.columns if c.startswith("exp(coef) upper"))
+
+        def coefficient(i: int, _alpha: float) -> dict[str, float]:
+            column = terms[i].column
+            return {
+                "estimate": float(summary.loc[column, "exp(coef)"]),
+                "ci_lower": float(summary.loc[column, lo_col]),
+                "ci_upper": float(summary.loc[column, hi_col]),
+                "p": float(summary.loc[column, "p"]),
+            }
+
+        return {
+            "beta": beta, "se": se, "terms": terms, "coefficient": coefficient,
+            "fitter": fitter, "table": table,
+            "df": float(usable.sum() - len(terms)),
+            "n_used": int(usable.sum()), "n_dropped": n_dropped,
+            "n_events": int(event[usable].sum()),
+            "concordance": float(fitter.concordance_index_),
+        }
+
+    @staticmethod
+    def _pooled_ph(fits, terms, check_ph: bool,
+                   ctx) -> tuple[list[dict[str, Any]], list[str]]:
+        """比例风险假设检验。
+
+        多份插补时没有公认的 p 值合并方式（Rubin 规则是给参数估计的，
+        不是给检验统计量的）。这里在每一份上各检一次，取**最小** p 值报出 ——
+        诊断用途上宁可偏严：只要有一份提示违背，就该引起注意。
+        """
+        if not check_ph:
+            return [], []
+
+        ctx.progress("检验比例风险假设", 0.9)
+        label_of = {t.column: t.label for t in terms}
+        worst: dict[str, float] = {}
+
+        for fit in fits:
+            result = proportional_hazard_test(
+                fit["fitter"], fit["table"], time_transform="rank"
+            )
+            for column, row in result.summary.iterrows():
+                key = column[0] if isinstance(column, tuple) else column
+                label = label_of.get(key, str(key))
+                value = float(row["p"])
+                worst[label] = min(worst.get(label, 1.0), value)
+
+        multiple = len(fits) > 1
+        rows = [{"label": label, "p": value} for label, value in worst.items()]
+        warnings = [
+            f"「{label}」不满足比例风险假设（"
+            + (f"{len(fits)} 份插补中最小 p={value:.3f}" if multiple else f"p={value:.3f}")
+            + "），该项的 HR 不宜按恒定风险比解读"
+            for label, value in worst.items() if value < 0.05
+        ]
+        return rows, warnings

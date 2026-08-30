@@ -130,13 +130,11 @@ class LogisticRegression(Analysis):
         if p.missing == "multiple_imputation":
             ctx.progress("多重插补", 0.2)
             try:
-                frames, impute_report = imputation.impute(
-                    ctx.frame, ctx.catalog, covariates, m=p.n_imputations
+                frames, impute_report = imputation.prepare_frames(
+                    ctx.frame, ctx.catalog, covariates, p.missing, p.n_imputations
                 )
             except imputation.ImputationError as exc:
                 raise DesignError(str(exc)) from exc
-            if impute_report.get("skipped"):
-                impute_report = None      # 本来就没有缺失，退回单次拟合
 
         fits: list[dict[str, Any]] = []
         terms: list = []
@@ -154,7 +152,8 @@ class LogisticRegression(Analysis):
 
         if len(fits) > 1:
             ctx.progress("按 Rubin 规则合并", 0.85)
-            rows = self._pool_rows(fits, terms, p.conf_level)
+            rows = imputation.pool_effect_rows(
+                fits, terms, p.conf_level, fits[0]["df"], offset=1)
         else:
             rows = [
                 {
@@ -330,23 +329,3 @@ class LogisticRegression(Analysis):
             "n_dropped": n_dropped, "n_events": float(y_used.sum()),
         }
 
-    @staticmethod
-    def _pool_rows(fits: list[dict[str, Any]], terms: list,
-                   conf_level: float) -> list[dict[str, Any]]:
-        """按 Rubin 规则把 m 次拟合合并成一组系数。"""
-        complete_df = fits[0]["df"]
-        rows = []
-        for i, t in enumerate(terms):
-            estimates = [float(f["beta"][i + 1]) for f in fits]
-            variances = [float(f["se"][i + 1]) ** 2 for f in fits]
-            pooled = imputation.pool(estimates, variances, conf_level, complete_df)
-            rows.append({
-                "label": t.label, "variable": t.variable, "reference": t.reference,
-                "estimate": float(np.exp(pooled.estimate)),
-                "ci_lower": float(np.exp(pooled.ci_low)),
-                "ci_upper": float(np.exp(pooled.ci_high)),
-                "p": pooled.p,
-                # 缺失信息占比：这个系数有多少不确定性是插补带来的
-                "fmi": round(pooled.fmi, 4),
-            })
-        return rows
