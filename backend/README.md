@@ -50,24 +50,26 @@ MEDDATA_API_KEY="$(python3 -c 'import secrets;print(secrets.token_urlsafe(32))')
 
 原始文件放 `data/raw/<dataset_id>/`，只读，永不修改 —— 这是可复现的前提。
 
-UCI Heart Disease（横断面，303 例）：
+一条命令取全部四个（幂等，已存在的会跳过）：
 
 ```bash
-curl -sSL -o data/raw/heart_disease.zip https://archive.ics.uci.edu/static/public/45/heart+disease.zip && unzip -o -q data/raw/heart_disease.zip -d data/raw/uci_heart
+./scripts/fetch_data.sh
 ```
 
-UCI Heart Failure Clinical Records（随访队列，299 例，可做生存分析）：
+也可以只取一个：`./scripts/fetch_data.sh nhanes`。
 
-```bash
-curl -sSL -o data/raw/hf.zip https://archive.ics.uci.edu/static/public/519/heart+failure+clinical+records.zip && unzip -o -q data/raw/hf.zip -d data/raw/heart_failure
-```
+NHANES 必须串行下载：并发会被 CDC 限流，而限流返回的是 **HTTP 200 的 HTML
+错误页** —— 曾经 8 个并发请求全部"成功"，拿回来的却是同一张 Page Not Found。
+脚本因此逐个校验 XPT 魔数，不合格的直接删掉并退出。
 
-NHANES 2017–2018（9254 人，复杂抽样调查）。**必须串行下载**，并发会被 CDC 限流，
-而且限流返回的是 HTTP 200 的错误页 —— 所以每个文件都要校验 XPT 魔数：
+四个数据集的来源：
 
-```bash
-cd data/raw && mkdir -p nhanes && for f in DEMO_J BMX_J BPX_J TCHOL_J DIQ_J BPQ_J SMQ_J; do curl -sSL --retry 3 -o "nhanes/$f.xpt" "https://wwwn.cdc.gov/nchs/data/nhanes/public/2017/datafiles/$f.xpt"; [ "$(head -c 20 "nhanes/$f.xpt" | tr -d '\0')" = "HEADER RECORD*******" ] && echo "ok $f" || { echo "BAD $f"; rm -f "nhanes/$f.xpt"; }; done
-```
+| 数据集 | 来源 |
+| --- | --- |
+| `uci_heart` | UCI ML Repository #45 |
+| `heart_failure` | UCI ML Repository #519 |
+| `nhanes_2017` | CDC NHANES 2017–2018 公开数据文件 |
+| `mimic_demo` | PhysioNet MIMIC-IV Clinical Database Demo 2.2（免认证） |
 
 导入走 API（`POST /api/datasets/uci_heart/import`）或前端「数据集」页的按钮。
 
@@ -411,6 +413,28 @@ outcome: str = Field(..., json_schema_extra=widgets.variable(
 `tests/_env.py` 必须被每个测试模块**最先**导入。`app.config` 在一个进程里只导入
 一次，各测试文件各设各的 `MEDDATA_DATA_DIR` 的话只有第一个生效，其余文件拿到的路径
 是假的（这曾让一个缓存测试单独跑通过、全量跑失败）。
+
+## 部署
+
+```bash
+docker compose up --build
+```
+
+界面和 API 都在 <http://localhost:8000> —— 前端产物由后端的 StaticFiles
+托管，单人用的研究工具没必要为了发静态文件再拉一个 nginx。
+`MEDDATA_STATIC_DIR` 不设时不挂载任何静态路由，开发流程（`ng serve` + proxy）
+完全不受影响。
+
+`backend/data` 挂成卷，容器重建不丢数据。compose 里端口只绑 127.0.0.1，
+要对外提供服务先设 `MEDDATA_API_KEY`。
+
+> Dockerfile 与 compose 文件是照着已经验证过的本机流程写的（依赖清单在干净
+> venv 里装过、`ng build` 产物用后端托管跑通过、`fetch_data.sh` 从零下载后
+> 305 个测试全绿），但**本机没有 Docker，镜像没有在这里构建过**。
+> CI 的 image 作业会构建它。
+
+CI 在 `.github/workflows/ci.yml`：后端测试、前端测试与构建、镜像构建三个作业。
+原始数据按 `fetch_data.sh` 的哈希缓存，免得每次都去打 CDC。
 
 ## 算子清单
 

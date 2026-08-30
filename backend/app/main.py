@@ -1,11 +1,15 @@
 from __future__ import annotations
 
 import logging
+import os
 import time
 from contextlib import asynccontextmanager
+from pathlib import Path
 
-from fastapi import Depends, FastAPI, Request
+from fastapi import Depends, FastAPI, HTTPException, Request, status
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import FileResponse
+from fastapi.staticfiles import StaticFiles
 
 from . import logging_setup, security
 from .api import analyses, cohorts, datasets, jobs, reports
@@ -72,3 +76,37 @@ app.include_router(reports.router, dependencies=_guard)
 @app.get("/api/health")
 def health() -> dict:
     return {"status": "ok", "auth_required": security.enabled()}
+
+
+# --- 前端静态资源（可选）---
+#
+# 只在 MEDDATA_STATIC_DIR 指向一个存在的目录时挂载。开发时不设这个变量，
+# 前端仍走 ng serve + proxy.conf.json，行为完全不变；容器里把 ng build 的
+# 产物放进去，一个进程就能同时供 API 和界面，不用再拉一个 nginx。
+_static = os.environ.get("MEDDATA_STATIC_DIR", "").strip()
+STATIC_DIR = Path(_static) if _static else None
+
+if STATIC_DIR and STATIC_DIR.is_dir():
+    _index = STATIC_DIR / "index.html"
+
+    app.mount("/assets", StaticFiles(directory=STATIC_DIR), name="assets")
+
+    @app.get("/{path:path}", include_in_schema=False)
+    def spa(path: str) -> FileResponse:
+        """把非 API 路径交给前端路由。
+
+        Angular 用的是 history 模式，/cohorts 这类地址在服务端并不存在文件，
+        直接刷新会 404，所以命不中静态文件就一律回 index.html。
+        """
+        # 打错的 API 路径必须还是 404，不能被兜底成一页 HTML —— 否则
+        # 客户端拿到 200 + <!doctype，会把「路由写错了」看成「返回了空数据」
+        if path == "api" or path.startswith("api/"):
+            raise HTTPException(status.HTTP_404_NOT_FOUND, detail=f"没有这个接口：/{path}")
+
+        candidate = (STATIC_DIR / path).resolve()
+        # 防目录穿越：解析后必须仍在静态目录之内
+        if path and STATIC_DIR.resolve() in candidate.parents and candidate.is_file():
+            return FileResponse(candidate)
+        return FileResponse(_index)
+
+    logging.getLogger("app").info("前端静态资源挂载自 %s", STATIC_DIR)
