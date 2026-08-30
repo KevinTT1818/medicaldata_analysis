@@ -10,6 +10,7 @@ from lifelines import CoxPHFitter, KaplanMeierFitter
 from lifelines.statistics import multivariate_logrank_test, proportional_hazard_test
 from pydantic import BaseModel, Field
 
+from ..config import MAX_VARIABLES_PER_ANALYSIS
 from ..cdm import values
 from . import weights as W
 from ..cohort.builder import TIME_SUFFIX, Variable
@@ -168,7 +169,9 @@ class CoxRegression(Analysis):
     class Params(BaseModel):
         outcome: str = Field(..., json_schema_extra=widgets.variable(
             "结局", "必须带随访时长", widgets.SURVIVAL_OUTCOME))
-        covariates: list[str] = Field(..., json_schema_extra=widgets.variables(
+        covariates: list[str] = Field(
+            ..., min_length=1, max_length=MAX_VARIABLES_PER_ANALYSIS,
+            json_schema_extra=widgets.variables(
             "协变量", "分类变量会自动做哑变量编码", widgets.COVARIATE))
         conf_level: float = Field(0.95, ge=0.5, le=0.999, title="置信水平",
                                   description="HR 置信区间的覆盖概率")

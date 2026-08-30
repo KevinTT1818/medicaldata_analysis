@@ -9,6 +9,7 @@ import statsmodels.api as sm
 from scipy import stats
 from pydantic import BaseModel, Field
 
+from ..config import MAX_VARIABLES_PER_ANALYSIS
 from ..cohort.builder import PSU_COLUMN, STRATUM_COLUMN
 from .base import Analysis, AnalysisContext, AnalysisResult
 from .design import DesignError, build_design
@@ -91,7 +92,9 @@ class LogisticRegression(Analysis):
     class Params(BaseModel):
         outcome: str = Field(..., json_schema_extra=widgets.variable(
             "结局", "必须是二分类", widgets.BINARY_OUTCOME))
-        covariates: list[str] = Field(..., json_schema_extra=widgets.variables(
+        covariates: list[str] = Field(
+            ..., min_length=1, max_length=MAX_VARIABLES_PER_ANALYSIS,
+            json_schema_extra=widgets.variables(
             "自变量", "分类变量会自动做哑变量编码", widgets.COVARIATE))
         conf_level: float = Field(0.95, ge=0.5, le=0.999, title="置信水平",
                                   description="OR 置信区间的覆盖概率")

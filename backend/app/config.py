@@ -23,6 +23,10 @@ for _d in (RAW_DIR, STAGING_DIR, CDM_DIR, CACHE_DIR):
 # 判定连续/分类变量的阈值：唯一值个数 <= 此值且为整数型时按分类处理
 CATEGORICAL_MAX_LEVELS = 10
 
+#: 一次分析最多纳入多少个变量。不是功能限制 —— MIMIC 的 189 个变量「全选」
+#: 是正常用法，这条线只是挡住畸形请求，免得一个请求就能撑爆内存。
+MAX_VARIABLES_PER_ANALYSIS = 500
+
 # 变量目录的最低覆盖率。MIMIC 有几百个 ICD 码，多数只出现在一两个人身上，
 # 全列出来变量选择器就没法用了，而且只覆盖一两个人的变量也做不了统计。
 # 被隐藏的数量会在 schema 响应里报出来。

@@ -9,6 +9,7 @@ import polars as pl
 from pydantic import BaseModel, Field
 from scipy import stats
 
+from ..config import MAX_VARIABLES_PER_ANALYSIS
 from ..cdm import values
 from ..cohort.builder import PSU_COLUMN, STRATUM_COLUMN, Variable
 from . import imputation
@@ -444,8 +445,10 @@ class BaselineTable(Analysis):
     result_kind = "baseline_table"
 
     class Params(BaseModel):
-        variables: list[str] = Field(..., json_schema_extra=widgets.variables(
-            "纳入变量", "出现在表格行上的变量"))
+        variables: list[str] = Field(
+            ..., min_length=1, max_length=MAX_VARIABLES_PER_ANALYSIS,
+            json_schema_extra=widgets.variables(
+                "纳入变量", "出现在表格行上的变量"))
         group_by: str | None = Field(None, json_schema_extra=widgets.variable(
             "分组变量", "留空则只出总体列", widgets.GROUPING))
         weighting: Literal["auto", "weighted", "unweighted"] = Field(
@@ -700,8 +703,10 @@ class Missingness(Analysis):
     result_kind = "missingness"
 
     class Params(BaseModel):
-        variables: list[str] = Field(..., json_schema_extra=widgets.variables(
-            "检查变量", "逐个统计缺失率"))
+        variables: list[str] = Field(
+            ..., min_length=1, max_length=MAX_VARIABLES_PER_ANALYSIS,
+            json_schema_extra=widgets.variables(
+                "检查变量", "逐个统计缺失率"))
 
     def run(self, ctx: AnalysisContext) -> AnalysisResult:
         frame, n = ctx.frame, ctx.frame.height
@@ -746,8 +751,10 @@ class Distribution(Analysis):
     result_kind = "distribution"
 
     class Params(BaseModel):
-        variables: list[str] = Field(..., json_schema_extra=widgets.variables(
-            "变量", "每个变量出一块图"))
+        variables: list[str] = Field(
+            ..., min_length=1, max_length=MAX_VARIABLES_PER_ANALYSIS,
+            json_schema_extra=widgets.variables(
+                "变量", "每个变量出一块图"))
         group_by: str | None = Field(None, json_schema_extra=widgets.variable(
             "分组变量", "留空则只看总体", widgets.GROUPING))
         bins: int = Field(20, ge=5, le=60, title="分箱数",
