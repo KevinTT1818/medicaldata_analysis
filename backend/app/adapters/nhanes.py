@@ -84,9 +84,30 @@ class NhanesAdapter(Adapter):
         present = {f.stem for f in SOURCE.glob("*.xpt")}
         return required.issubset(present)
 
-    @staticmethod
-    def _read(name: str) -> pd.DataFrame:
-        return pd.read_sas(SOURCE / f"{name}.xpt", format="xport")
+    #: pandas.read_sas 把 XPT 里的数值 0 读成这个次正规数而不是 0.0。
+    #: NHANES 没有任何合法取值小到这个量级，凡是绝对值小于它的都是 0。
+    ZERO_EPS = 1e-70
+
+    @classmethod
+    def _read(cls, name: str) -> pd.DataFrame:
+        """读一个 XPT，并把 read_sas 表示 0 的次正规数还原成 0。
+
+        不还原会让好几处「等于 0」的判断静默失效，因为 5.4e-79 既不等于 0
+        也大于 0：
+
+        - `_mean_bp` 里「读数为 0 表示未测得」的 replace(0, nan) 匹配不上，
+          81 条未测得的舒张压被当成真实读数平均进去，均值从 69.5 掉到 68.4
+        - 只完成访谈者的 WTMEC2YR 真值是 0，但 `weights._clean` 的 `w > 0`
+          判定为真，这些人没被排除在加权估计之外（点估计不受影响 ——
+          乘 5.4e-79 等于没有 —— 但报出来的 n 把他们算进去了）
+        - 未满 1 岁的婴儿年龄真值是 0，库里存成 5.4e-79
+        """
+        frame = pd.read_sas(SOURCE / f"{name}.xpt", format="xport")
+        for column in frame.columns:
+            if frame[column].dtype.kind == "f":
+                frame[column] = frame[column].mask(
+                    frame[column].abs() < cls.ZERO_EPS, 0.0)
+        return frame
 
     @staticmethod
     def _mean_bp(frame: pd.DataFrame, prefix: str) -> pd.Series:
