@@ -4,6 +4,12 @@
   </p>
 }
 
+@if (imputationNote(); as note) {
+  <p class="survey-note is-impute">
+    <span class="badge">已插补</span>{{ note }}
+  </p>
+}
+
 <div class="layout">
   <app-echart [option]="option()" [ariaLabel]="ariaLabel()" [height]="chartHeight()" />
 
@@ -18,6 +24,9 @@
           <th scope="col" class="num"><i>p</i></th>
           @if (hasPh()) {
             <th scope="col" class="num">PH <i>p</i></th>
+          }
+          @if (hasFmi()) {
+            <th scope="col" class="num" title="缺失信息占比：该系数有多少不确定性来自插补">FMI</th>
           }
         </tr>
       </thead>
@@ -42,6 +51,9 @@
               <td class="num" [class.ph-fail]="(phByLabel().get(row.label) ?? 1) < 0.05">
                 {{ phByLabel().has(row.label) ? formatP(phByLabel().get(row.label)!) : '—' }}
               </td>
+            }
+            @if (hasFmi()) {
+              <td class="num" [class.fmi-high]="(row.fmi ?? 0) > 0.3">{{ formatFmi(row.fmi) }}</td>
             }
           </tr>
         }

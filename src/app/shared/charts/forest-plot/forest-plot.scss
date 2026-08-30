@@ -157,3 +157,17 @@ tbody tr:last-child th { border-bottom: 0; }
   border-radius: 2px;
   border: 1px solid currentcolor;
 }
+
+.survey-note.is-impute {
+  background: var(--surface-2);
+  border-color: var(--rule-strong);
+  color: var(--ink-2);
+}
+
+.survey-note.is-impute .badge { color: var(--muted); }
+
+/* FMI 超过 0.3 意味着这个系数很大程度上是插补模型给的，不是数据给的 */
+.fmi-high {
+  color: var(--amber);
+  font-weight: 700;
+}

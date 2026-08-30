@@ -54,6 +54,24 @@ export class ForestPlot {
   });
   readonly hasRoc = computed(() => !!this.result().roc?.fpr.length);
 
+  readonly hasFmi = computed(() =>
+    this.result().rows.some((r) => r.fmi !== null && r.fmi !== undefined),
+  );
+
+  /** 多重插补的一句话说明。未用插补时为 null。 */
+  readonly imputationNote = computed(() => {
+    const report = this.result().imputation;
+    if (!report) return null;
+    const names = report.columns
+      .map((c) => `${c.pct}%`)
+      .join(' / ');
+    return (
+      `多重插补 ${report.m} 份 × ${report.iterations} 轮，` +
+      `${report.imputed_rows} / ${report.total_rows} 行被补全` +
+      (names ? `（各变量缺失率 ${names}）` : '')
+    );
+  });
+
   readonly chartHeight = computed(() => `${Math.max(200, this.rows().length * 40 + 84)}px`);
 
   readonly ariaLabel = computed(() => {
@@ -66,6 +84,10 @@ export class ForestPlot {
 
   formatP(p: number): string {
     return p < 0.001 ? '<0.001' : p.toFixed(3);
+  }
+
+  formatFmi(value: number | null | undefined): string {
+    return value === null || value === undefined ? '—' : value.toFixed(3);
   }
 
   formatEffect(value: number): string {

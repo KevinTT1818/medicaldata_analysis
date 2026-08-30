@@ -178,6 +178,16 @@ export interface ForestRow {
   ci_lower: number;
   ci_upper: number;
   p: number;
+  /** 缺失信息占比：这个系数有多少不确定性是插补带来的。仅多重插补时有值。 */
+  fmi?: number | null;
+}
+
+export interface ImputationReport {
+  m: number;
+  iterations: number;
+  imputed_rows: number;
+  total_rows: number;
+  columns: { variable: string; n_missing: number; pct: number; kind: string }[];
 }
 
 export interface RocData {
@@ -205,8 +215,10 @@ export interface ForestResult {
     df: number;
     approximate: boolean;
   } | null;
-  /** 加权拟合下伪 R² 没有标准定义，此时为 null。 */
+  /** 加权拟合与合并结果下伪 R² 都没有标准定义，此时为 null。 */
   pseudo_r2?: number | null;
+  /** 多重插补的执行情况。未用插补时为 null。 */
+  imputation?: ImputationReport | null;
   concordance?: number;
   n_used: number;
   n_events: number;
