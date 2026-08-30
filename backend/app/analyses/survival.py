@@ -244,6 +244,8 @@ class CoxRegression(Analysis):
 
         n_used = primary["n_used"]
         n_dropped = primary["n_dropped"]
+        n_no_followup = primary["n_no_followup"]
+        n_missing_covariate = primary["n_missing_covariate"]
         n_events = primary["n_events"]
 
         notes = [
@@ -251,6 +253,15 @@ class CoxRegression(Analysis):
             "分类变量用哑变量编码，参照组在行标签中标出。",
         ]
         analysis_warnings = list(ph_warnings)
+
+        # 没有随访的人不是「缺失」，是不在被随访的人群里 —— 单列出来，
+        # 免得把「不适用」读成「数据没收全」，进而误以为插补能救。
+        # （NHANES 死亡关联里 3756 人未满 18 岁或不符合关联条件。）
+        if n_no_followup:
+            notes.append(
+                f"另有 {n_no_followup} 例没有随访数据，不在被随访的人群里，"
+                f"未纳入分析 —— 这不是缺失，插补也补不出来。"
+            )
 
         if impute_report is not None:
             notes.append(
@@ -272,12 +283,15 @@ class CoxRegression(Analysis):
                     f"这些变量缺失超过 40%：{names}。结论有很大一部分是插补模型给的 —— "
                     f"看每个系数的 FMI。"
                 )
-        elif n_dropped:
-            notes.append(f"因协变量缺失剔除 {n_dropped} 例（complete-case）。")
-            if n_dropped / max(n_used + n_dropped, 1) > 0.1:
+        elif n_missing_covariate:
+            notes.append(f"因协变量缺失剔除 {n_missing_covariate} 例（complete-case）。")
+            # 分母只算被随访的人 —— 把不在随访人群里的人算进去会把缺失率
+            # 夸大成一个吓人的百分比，并给出「改用插补」这条错误建议。
+            eligible = n_used + n_missing_covariate
+            if n_missing_covariate / max(eligible, 1) > 0.1:
                 analysis_warnings.append(
-                    f"完全病例分析丢掉了 {n_dropped} 例"
-                    f"（{n_dropped / (n_used + n_dropped) * 100:.0f}%）。"
+                    f"完全病例分析丢掉了 {n_missing_covariate} 例"
+                    f"（被随访人群的 {n_missing_covariate / eligible * 100:.0f}%）。"
                     f"缺失通常不是随机的，这会引入选择偏倚 —— 可改用多重插补。"
                 )
 
@@ -299,6 +313,8 @@ class CoxRegression(Analysis):
                 "n_used": n_used,
                 "n_events": n_events,
                 "n_dropped": n_dropped,
+                "n_no_followup": n_no_followup,
+                "n_missing_covariate": n_missing_covariate,
                 "concordance": concordance,
                 "notes": notes,
             },
@@ -313,6 +329,12 @@ class CoxRegression(Analysis):
         """在一份（可能是插补后的）数据上拟合一次 Cox 模型。"""
         matrix, terms, complete = build_design(frame, ctx.catalog, covariates)
         usable = complete & survival_ok
+        # 两类剔除的性质完全不同，不能合并成一个数：
+        #   没有随访 —— 这些人根本不在被随访的人群里（NHANES 里是未满 18 岁
+        #     与其他不符合关联条件的人）。给他们插补生存时间等于把结局编出来。
+        #   协变量缺失 —— 这才是插补能救的那一类。
+        n_no_followup = int((~survival_ok).sum())
+        n_missing_covariate = int((survival_ok & ~complete).sum())
         n_dropped = int((~usable).sum())
         if usable.sum() < len(terms) + 2:
             raise DesignError("完整病例数太少，不足以估计这个模型")
@@ -346,6 +368,8 @@ class CoxRegression(Analysis):
             "fitter": fitter, "table": table,
             "df": float(usable.sum() - len(terms)),
             "n_used": int(usable.sum()), "n_dropped": n_dropped,
+            "n_no_followup": n_no_followup,
+            "n_missing_covariate": n_missing_covariate,
             "n_events": int(event[usable].sum()),
             "concordance": float(fitter.concordance_index_),
         }

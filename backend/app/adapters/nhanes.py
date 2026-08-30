@@ -30,6 +30,22 @@ from .base import Adapter, CdmTables, register
 SOURCE = RAW_DIR / "nhanes"
 CYCLE = "J"  # 2017–2018
 
+#: NCHS 公开版死亡关联文件（定宽 ASCII）。可选 —— 没有它其余部分照常工作。
+MORTALITY_FILE = SOURCE / "NHANES_2017_2018_MORT_2019_PUBLIC.dat"
+
+#: 定宽布局，1 起始的闭区间。取自 NCHS 随文件发布的 SAS 读入语句，
+#: 并对着实际文件逐列核对过（哪些位置有非空白取值）。
+MORTALITY_LAYOUT = {
+    "seqn": (1, 6),
+    "eligstat": (15, 15),     # 1=符合关联条件 2=未满 18 岁 3=其他不符合
+    "mortstat": (16, 16),     # 0=存活 1=死亡 .=不适用
+    "ucod_leading": (17, 19),
+    "diabetes": (20, 20),
+    "hyperten": (21, 21),
+    "permth_int": (43, 45),   # 自访谈日起的随访月数
+    "permth_exm": (46, 48),   # 自体检日起的随访月数
+}
+
 #: 问卷的「拒答 / 不知道」编码，一律当缺失
 REFUSED_DONT_KNOW = {7, 9, 77, 99, 777, 999, 7777, 9999}
 
@@ -127,6 +143,78 @@ class NhanesAdapter(Adapter):
         if mean_later is None:
             return first_value
         return mean_later.fillna(first_value) if first_value is not None else mean_later
+
+    @staticmethod
+    def has_mortality() -> bool:
+        return MORTALITY_FILE.is_file()
+
+    @classmethod
+    def _read_mortality(cls) -> pd.DataFrame | None:
+        """读死亡关联文件。没有就返回 None，其余部分照常工作。
+
+        文件是定宽 ASCII，缺失写作 `.`。行尾空格被截掉了，所以有的行只有 46
+        个字符而布局到 48 —— 切片天然容错，不用补齐。
+        """
+        if not cls.has_mortality():
+            return None
+
+        records = []
+        for line in MORTALITY_FILE.read_text().splitlines():
+            if not line.strip():
+                continue
+            records.append({
+                name: line[start - 1:end].strip()
+                for name, (start, end) in MORTALITY_LAYOUT.items()
+            })
+        return pd.DataFrame(records)
+
+    @classmethod
+    def _mortality_outcome(cls, ds: str, pid_of: dict[int, str]) -> pl.DataFrame:
+        """全因死亡结局。
+
+        只给 ELIGSTAT=1（符合关联条件）的人建记录 —— 未满 18 岁与其他不符合的人
+        本来就没有随访，给他们一条 followup=NULL 的记录只会让「结局缺失」和
+        「不在随访范围内」混成一谈。
+
+        随访时间用 PERMTH_EXM（自体检日起）而不是 PERMTH_INT（自访谈日起）：
+        person.sample_weight 存的是 MEC 体检权重，权重与随访时间必须指向同一个
+        抽样框。只完成访谈的 311 人没有 PERMTH_EXM，他们的 MEC 权重恰好也是 0，
+        两边是自洽的。
+
+        **只导入全因死亡。** 文件里有 UCOD_LEADING（心脏病 37 例、恶性肿瘤 34
+        例、其他 74 例），但病因别死亡要按竞争风险处理才严谨，而且 37 例事件跑
+        Cox 估计很不稳 —— 导进来只会诱使人做欠功效的分析。
+        """
+        empty = pl.DataFrame(schema={
+            "dataset": pl.Utf8, "person_id": pl.Utf8, "event_type": pl.Utf8,
+            "event_ts": pl.Datetime, "censor_ts": pl.Datetime,
+            "followup_days": pl.Float64, "is_event": pl.Boolean,
+        })
+
+        mort = cls._read_mortality()
+        if mort is None:
+            return empty
+
+        eligible = mort[mort["eligstat"] == "1"]
+
+        rows: list[dict] = []
+        for record in eligible.to_dict("records"):
+            person_id = pid_of.get(int(record["seqn"]))
+            months = record["permth_exm"]
+            if person_id is None or not months.isdigit():
+                continue
+            rows.append({
+                "dataset": ds,
+                "person_id": person_id,
+                "event_type": "death",
+                "event_ts": None,
+                "censor_ts": None,
+                # 月折成天。NCHS 只给到月，30.4375 = 365.25 / 12
+                "followup_days": int(months) * 30.4375,
+                "is_event": record["mortstat"] == "1",
+            })
+
+        return pl.DataFrame(rows, schema=empty.schema) if rows else empty
 
     def build(self) -> CdmTables:
         ds = self.dataset_id
@@ -245,20 +333,13 @@ class NhanesAdapter(Adapter):
             "name": pl.Utf8, "start_ts": pl.Datetime, "end_ts": pl.Datetime,
             "dose": pl.Float64, "dose_unit": pl.Utf8, "route": pl.Utf8,
         })
-        # 横断面调查，没有随访与结局事件
-        empty_outcome = pl.DataFrame(schema={
-            "dataset": pl.Utf8, "person_id": pl.Utf8, "event_type": pl.Utf8,
-            "event_ts": pl.Datetime, "censor_ts": pl.Datetime,
-            "followup_days": pl.Float64, "is_event": pl.Boolean,
-        })
-
         return {
             "person": person,
             "visit": empty_visit,
             "condition": empty_condition,
             "measurement": pl.concat(measurement_frames, how="vertical"),
             "drug": empty_drug,
-            "outcome": empty_outcome,
+            "outcome": self._mortality_outcome(ds, pid_of),
         }
 
 

@@ -71,6 +71,29 @@ if want nhanes; then
   done
 fi
 
+# --- NHANES 死亡关联文件（公开版）---
+#
+# 让 nhanes_2017 成为唯一同时具备抽样权重与随访时间的数据集。可选：
+# 没有它 nhanes_2017 的其余部分照常工作，只是没有生存结局。
+if want nhanes || want mortality; then
+  OUT="$RAW/nhanes/NHANES_2017_2018_MORT_2019_PUBLIC.dat"
+  if [ -f "$OUT" ] && [ "$(wc -l < "$OUT")" -gt 9000 ]; then
+    say "死亡关联文件已存在，跳过"
+  else
+    echo "下载 NHANES 死亡关联文件 …"
+    fetch "https://ftp.cdc.gov/pub/HEALTH_STATISTICS/NCHS/datalinkage/linked_mortality/NHANES_2017_2018_MORT_2019_PUBLIC.dat" "$OUT"
+    # 定宽 ASCII，一人一行，应当与 DEMO_J 的 9254 人一致
+    LINES=$(wc -l < "$OUT")
+    if [ "$LINES" -gt 9000 ]; then
+      say "ok（$LINES 行）"
+    else
+      rm -f "$OUT"
+      echo "  BAD 死亡关联文件只有 $LINES 行，多半没下全" >&2
+      exit 1
+    fi
+  fi
+fi
+
 # --- MIMIC-IV Clinical Database Demo（100 名患者，免认证）---
 if want mimic_demo; then
   if [ -f "$RAW/mimic_demo/hosp/patients.csv.gz" ]; then
