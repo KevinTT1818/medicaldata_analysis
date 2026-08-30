@@ -267,92 +267,209 @@ STRATUM_COLUMN = "__stratum"
 PSU_COLUMN = "__psu"
 
 
-def _select_expr(
-    var_id: str, idx: int, agg: MeasurementAgg = DEFAULT_AGG
-) -> tuple[list[str], str | None, Any | None]:
-    """返回 (SELECT 片段列表, JOIN 片段, 要绑定的参数值)。
+#: 每张来源表在宽表 SQL 里的连接别名。同一张表的所有变量共用一次扫描。
+#:
+#: 早先的写法是每个变量各开一个 LEFT JOIN 子查询，代价随变量数爆炸而与行数无关：
+#: MIMIC 只有 100 行，5/20/60/189 个变量分别要 7/41/349/11930 毫秒，
+#: 同一条查询加 EXPLAIN ANALYZE 会直接吃掉 6.3 GiB 内存 —— 186 个 JOIN 塞进
+#: 一条查询，查询计划器就失控了。界面上点一下「全选」就能触发。
+#:
+#: 改成按来源表分组、一次扫描 + FILTER 分别聚合之后，JOIN 数量固定为最多 4 个，
+#: 与选了多少变量无关：同样的 5/20/80/189 个变量是 7/50/179/238 毫秒。
+#:
+#: 代价是变量少时略慢（20 个变量 36→50ms，NHANES 的 14 个变量 43→54ms）——
+#: 分组扫描的固定开销在变量少时摊不开。横断面数据集一人一项只有一个值，
+#: 免掉有序聚合能把这部分赚回来，但判断"有没有重复测量"本身就要 5-7ms，
+#: 和省下的时间相当，而判断错了会静默给出不同的数值（MIMIC 上已验证）。
+#: 拿一个静默出错的风险去换十几毫秒不划算，所以只保留这一条路径。
+SOURCE_ALIAS = {
+    "measurement": "m",
+    "condition": "cd",
+    "visit": "v",
+    "outcome": "o",
+}
 
-    参数值由本函数一并给出 —— 由调用方去猜「这个变量要绑什么」，
-    就会出现「JOIN 里没用到 $c0 却仍然绑了它」这类参数数量对不上的错。
-    不需要绑定时返回 None。结局变量会多出一列随访时长。
-    """
-    source, _, key = var_id.partition(".")
-    alias = f'"{var_id}"'
+#: 一个变量在宽表里占的列。多数变量一列，结局变量多一列随访时长。
+_Plan = dict[int, list[str]]
 
-    if source == "person":
-        return [f"p.{key} AS {alias}"], None, None
 
-    j = f"j{idx}"
-    if source == "measurement":
-        # 数值按指定策略聚合；文本值没有大小可言，一律取时间上的首个
-        numeric_expr = {
-            "first": "first(value_num ORDER BY ts NULLS FIRST)",
-            "last": "last(value_num ORDER BY ts NULLS FIRST)",
-            "mean": "avg(value_num)",
-            "min": "min(value_num)",
-            "max": "max(value_num)",
-        }[agg]
-        join = (
-            f"LEFT JOIN (SELECT person_id,"
-            f" {numeric_expr} AS vnum,"
-            f" first(value_text ORDER BY ts NULLS FIRST) AS vtext"
-            f" FROM measurement WHERE dataset = $ds AND code = $c{idx}"
-            f" GROUP BY person_id) {j} ON {j}.person_id = p.person_id"
-        )
-        return [f"coalesce({j}.vtext, CAST({j}.vnum AS VARCHAR)) AS {alias}"], join, key
+def _measurement_plan(
+    entries: list[tuple[int, str, str]], agg: MeasurementAgg, params: dict[str, Any]
+) -> tuple[_Plan, str]:
+    # 数值按指定策略聚合；文本值没有大小可言，一律取时间上的首个
+    numeric_expr = {
+        "first": "first(value_num ORDER BY ts NULLS FIRST)",
+        "last": "last(value_num ORDER BY ts NULLS FIRST)",
+        "mean": "avg(value_num)",
+        "min": "min(value_num)",
+        "max": "max(value_num)",
+    }[agg]
+    a = SOURCE_ALIAS["measurement"]
+    plan: _Plan = {}
+    cols: list[str] = []
+    codes: list[str] = []
 
-    if source == "condition":
-        join = (
-            f"LEFT JOIN (SELECT DISTINCT person_id FROM condition"
-            f" WHERE dataset = $ds AND code = $c{idx}) {j}"
-            f" ON {j}.person_id = p.person_id"
-        )
-        return [f"CAST({j}.person_id IS NOT NULL AS INTEGER) AS {alias}"], join, key
+    for idx, vid, code in entries:
+        key = f"c{idx}"
+        params[key] = code
+        codes.append(f"${key}")
+        # 第二阶段只是把每 (人, 项) 的那一个值挪到对应的列上，any_value 足够
+        cols.append(f"any_value(vnum) FILTER (WHERE code = ${key}) AS num{idx}")
+        cols.append(f"any_value(vtext) FILTER (WHERE code = ${key}) AS txt{idx}")
+        plan[idx] = [f'coalesce({a}.txt{idx}, CAST({a}.num{idx} AS VARCHAR)) AS "{vid}"']
 
-    if source == "visit":
-        metric, _, visit_type = key.partition(":")
+    # 两阶段：先按 (人, 项) 各聚合一次，再摊平成宽表。
+    # 一步到位地写成「每个变量一个带 ORDER BY 的 FILTER 聚合」的话，
+    # 有序聚合的次数是 2×变量数，每次都要在组内排序；MIMIC 的 32 个测量项
+    # （135756 行）要 270ms。先分组聚合再摊平只排一次，降到 170ms。
+    inner = (
+        f"SELECT person_id, code, {numeric_expr} AS vnum,"
+        f" first(value_text ORDER BY ts NULLS FIRST) AS vtext"
+        f" FROM measurement WHERE dataset = $ds AND code IN ({', '.join(codes)})"
+        f" GROUP BY person_id, code"
+    )
+    join = (
+        f"LEFT JOIN (SELECT person_id, {', '.join(cols)} FROM ({inner})"
+        f" GROUP BY person_id) {a} ON {a}.person_id = p.person_id"
+    )
+    return plan, join
+
+
+def _condition_plan(
+    entries: list[tuple[int, str, str]], params: dict[str, Any]
+) -> tuple[_Plan, str]:
+    a = SOURCE_ALIAS["condition"]
+    plan: _Plan = {}
+    cols: list[str] = []
+    codes: list[str] = []
+
+    for idx, vid, code in entries:
+        key = f"c{idx}"
+        params[key] = code
+        codes.append(f"${key}")
+        cols.append(f"count(*) FILTER (WHERE code = ${key}) > 0 AS has{idx}")
+        # 一条诊断都没有的人根本不在子查询里，LEFT JOIN 给 NULL —— 也是「否」
+        plan[idx] = [f'CAST(coalesce({a}.has{idx}, false) AS INTEGER) AS "{vid}"']
+
+    join = (
+        f"LEFT JOIN (SELECT person_id, {', '.join(cols)}"
+        f" FROM condition WHERE dataset = $ds AND code IN ({', '.join(codes)})"
+        f" GROUP BY person_id) {a} ON {a}.person_id = p.person_id"
+    )
+    return plan, join
+
+
+def _visit_plan(
+    entries: list[tuple[int, str, str]], params: dict[str, Any]
+) -> tuple[_Plan, str]:
+    a = SOURCE_ALIAS["visit"]
+    # 时长按秒算再折成天，避免整除丢掉不足一天的部分
+    los = "date_diff('second', start_ts, end_ts) / 86400.0"
+    plan: _Plan = {}
+    cols: list[str] = []
+    types: list[str] = []
+
+    for idx, vid, key_str in entries:
+        metric, _, visit_type = key_str.partition(":")
+        key = f"c{idx}"
+        params[key] = visit_type
+        types.append(f"${key}")
 
         if metric == "discharge_status":
-            join = (
-                f"LEFT JOIN (SELECT person_id,"
-                f" last(discharge_status ORDER BY end_ts NULLS FIRST) AS status"
-                f" FROM visit WHERE dataset = $ds AND visit_type = $c{idx}"
-                f" AND discharge_status IS NOT NULL"
-                f" GROUP BY person_id) {j} ON {j}.person_id = p.person_id"
+            cols.append(
+                f"last(discharge_status ORDER BY end_ts NULLS FIRST)"
+                f" FILTER (WHERE visit_type = ${key} AND discharge_status IS NOT NULL)"
+                f" AS st{idx}"
             )
-            return [f"{j}.status AS {alias}"], join, visit_type
+            plan[idx] = [f'{a}.st{idx} AS "{vid}"']
+            continue
 
-        # 时长按秒算再折成天，避免整除丢掉不足一天的部分
-        los = "date_diff('second', start_ts, end_ts) / 86400.0"
         aggregate = {
             "count": "count(*)",
             "los_total": f"sum({los})",
             "los_max": f"max({los})",
         }[metric]
-        join = (
-            f"LEFT JOIN (SELECT person_id, {aggregate} AS v"
-            f" FROM visit WHERE dataset = $ds AND visit_type = $c{idx}"
-            f" GROUP BY person_id) {j} ON {j}.person_id = p.person_id"
-        )
+        cols.append(f"{aggregate} FILTER (WHERE visit_type = ${key}) AS val{idx}")
         # 次数缺省补 0（没住过就是 0 次）；时长缺省保持 NULL（没住过谈不上住了几天）
-        expr = f"coalesce({j}.v, 0)" if metric == "count" else f"{j}.v"
-        return [f"CAST({expr} AS VARCHAR) AS {alias}"], join, visit_type
+        expr = f"coalesce({a}.val{idx}, 0)" if metric == "count" else f"{a}.val{idx}"
+        plan[idx] = [f'CAST({expr} AS VARCHAR) AS "{vid}"']
 
-    if source == "outcome":
-        join = (
-            f"LEFT JOIN (SELECT person_id, bool_or(is_event) AS ev,"
-            f" max(followup_days) AS fu FROM outcome"
-            f" WHERE dataset = $ds AND event_type = $c{idx}"
-            f" GROUP BY person_id) {j} ON {j}.person_id = p.person_id"
-        )
-        return (
-            [f"CAST({j}.ev AS INTEGER) AS {alias}",
-             f'{j}.fu AS "{var_id}{TIME_SUFFIX}"'],
-            join,
-            key,
-        )
+    join = (
+        f"LEFT JOIN (SELECT person_id, {', '.join(cols)}"
+        f" FROM visit WHERE dataset = $ds AND visit_type IN ({', '.join(types)})"
+        f" GROUP BY person_id) {a} ON {a}.person_id = p.person_id"
+    )
+    return plan, join
 
-    raise ValueError(f"未知变量来源：{source}")
+
+def _outcome_plan(
+    entries: list[tuple[int, str, str]], params: dict[str, Any]
+) -> tuple[_Plan, str]:
+    a = SOURCE_ALIAS["outcome"]
+    plan: _Plan = {}
+    cols: list[str] = []
+    events: list[str] = []
+
+    for idx, vid, event_type in entries:
+        key = f"c{idx}"
+        params[key] = event_type
+        events.append(f"${key}")
+        cols.append(f"bool_or(is_event) FILTER (WHERE event_type = ${key}) AS ev{idx}")
+        cols.append(f"max(followup_days) FILTER (WHERE event_type = ${key}) AS fu{idx}")
+        plan[idx] = [
+            f'CAST({a}.ev{idx} AS INTEGER) AS "{vid}"',
+            f'{a}.fu{idx} AS "{vid}{TIME_SUFFIX}"',
+        ]
+
+    join = (
+        f"LEFT JOIN (SELECT person_id, {', '.join(cols)}"
+        f" FROM outcome WHERE dataset = $ds AND event_type IN ({', '.join(events)})"
+        f" GROUP BY person_id) {a} ON {a}.person_id = p.person_id"
+    )
+    return plan, join
+
+
+_PLANNERS = {
+    "condition": _condition_plan,
+    "visit": _visit_plan,
+    "outcome": _outcome_plan,
+}
+
+
+def _compile_variables(
+    variables: list[str], agg: MeasurementAgg, params: dict[str, Any]
+) -> tuple[list[str], list[str]]:
+    """把变量列表编译成 (SELECT 片段, JOIN 片段)。
+
+    按来源表分组，每张表只扫一次；同一张表里各变量的聚合靠 FILTER 分开算。
+    输出的列顺序仍按传入的变量顺序，不受内部分组影响。
+
+    绑定参数由本函数一并生成 —— 由调用方去猜「这个变量要绑什么」，
+    就会出现「JOIN 里没用到 $c0 却仍然绑了它」这类参数数量对不上的错。
+    """
+    grouped: dict[str, list[tuple[int, str, str]]] = {}
+    plan: _Plan = {}
+
+    for idx, vid in enumerate(variables):
+        source, _, key = vid.partition(".")
+        if source == "person":
+            plan[idx] = [f'p.{key} AS "{vid}"']
+            continue
+        if source not in SOURCE_ALIAS:
+            raise ValueError(f"未知变量来源：{source}")
+        grouped.setdefault(source, []).append((idx, vid, key))
+
+    joins: list[str] = []
+    for source, entries in grouped.items():
+        if source == "measurement":
+            part, join = _measurement_plan(entries, agg, params)
+        else:
+            part, join = _PLANNERS[source](entries, params)
+        plan.update(part)
+        joins.append(join)
+
+    selects = [expr for idx in range(len(variables)) for expr in plan[idx]]
+    return selects, joins
 
 
 def person_count(dataset: str) -> int:
@@ -420,22 +537,16 @@ def build_feature_frame(
     agg 决定一人一项有多个值时取哪一个。横断面数据集只有一个值，取哪个都一样；
     住院时序数据（MIMIC）平均每人每项 43 个值，这个选择会实实在在改变结论。
     """
+    params: dict[str, Any] = {"ds": dataset}
+    var_selects, joins = _compile_variables(variables, agg, params)
+
     selects = [
         "p.person_id",
         f'p.sample_weight AS "{WEIGHT_COLUMN}"',
         f'p.stratum AS "{STRATUM_COLUMN}"',
         f'p.psu AS "{PSU_COLUMN}"',
+        *var_selects,
     ]
-    joins: list[str] = []
-    params: dict[str, Any] = {"ds": dataset}
-
-    for i, vid in enumerate(variables):
-        sel, join, bound = _select_expr(vid, i, agg)
-        selects.extend(sel)
-        if join:
-            joins.append(join)
-        if bound is not None:
-            params[f"c{i}"] = bound
 
     inner = (
         f"SELECT {', '.join(selects)} FROM person p "
