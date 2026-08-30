@@ -192,9 +192,19 @@ def init() -> None:
         print(f"[cdm] 已补列：{', '.join(added)}")
 
 
-def clear_dataset(dataset: str) -> None:
-    """删除某个数据集在 CDM 各表中的全部行，用于重新导入。"""
-    with store.write() as conn:
+def clear_dataset(dataset: str, conn=None) -> None:
+    """删除某个数据集在 CDM 各表中的全部行，用于重新导入。
+
+    传入 `conn` 可以让这次删除并入调用方的事务——重新导入必须这么做，
+    否则"删除"会先单独提交，并发的读就会看到一个空数据集。
+    """
+    def run(c) -> None:
         for t in TABLES:
-            conn.execute(f"DELETE FROM {t} WHERE dataset = ?", [dataset])
-        conn.execute("DELETE FROM dataset_registry WHERE dataset = ?", [dataset])
+            c.execute(f"DELETE FROM {t} WHERE dataset = ?", [dataset])
+        c.execute("DELETE FROM dataset_registry WHERE dataset = ?", [dataset])
+
+    if conn is not None:
+        run(conn)
+        return
+    with store.write() as own:
+        run(own)
