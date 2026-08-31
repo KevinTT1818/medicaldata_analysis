@@ -1,0 +1,82 @@
+<div class="headline">
+  <div class="count">
+    <span class="n">{{ preview().n }}</span>
+    <span class="of">/ {{ preview().total }} 例</span>
+  </div>
+  <div class="meter" role="img" [attr.aria-label]="'命中 ' + preview().pct + '%'">
+    <span class="fill" [style.width.%]="barWidth()"></span>
+  </div>
+  <span class="pct">{{ preview().pct }}%</span>
+</div>
+
+@if (preview().n === 0) {
+  <p class="alert-empty">筛选条件太严，队列里一个人都没有。放宽条件再试。</p>
+}
+
+@if (steps().length) {
+  <section class="flow">
+    <h4>入排流程</h4>
+    @if (!preview().flow.sequential) {
+      <p class="note">顶层是「或」条件，拆不成先后步骤，只报总体结果。</p>
+    }
+    <ol>
+      @for (step of steps(); track $index) {
+        <li>
+          <div class="step-head">
+            <span class="label">{{ step.label }}</span>
+            <span class="delta">
+              {{ step.n_before }} → <strong>{{ step.n_after }}</strong>
+            </span>
+          </div>
+          <div class="track">
+            <span class="kept" [style.width.%]="step.keepPct"></span>
+          </div>
+          @if (step.n_excluded > 0) {
+            <p class="excluded">
+              排除 {{ step.n_excluded }} 例
+              @if (step.n_excluded_missing > 0) {
+                <span class="missing-note">
+                  ，其中 {{ step.n_excluded_missing }} 例是因为该变量缺失（占
+                  {{ step.missingShare }}%），并非不满足条件
+                </span>
+              }
+            </p>
+          }
+        </li>
+      }
+    </ol>
+
+    @if (totalMissingExcluded() > 0) {
+      <p class="warn">
+        共 {{ totalMissingExcluded() }} 例因变量缺失被排除。缺失不是随机的——做了某项检查
+        本身往往和病情相关，这样删人会引入选择偏倚。缺失比例高时应考虑多重插补。
+      </p>
+    }
+  </section>
+}
+
+@if (preview().summary.length) {
+  <section class="summary">
+    <h4>队列人口学</h4>
+    <dl>
+      @for (item of preview().summary; track item.variable) {
+        <div class="item">
+          <dt>{{ item.label }}</dt>
+          <dd>
+            @if (item.kind === 'continuous') {
+              {{ item.median }}
+              <span class="iqr">({{ item.q1 }}–{{ item.q3 }})</span>
+              @if (item.unit) {
+                <span class="unit">{{ item.unit }}</span>
+              }
+            } @else {
+              @for (level of item.levels ?? []; track level.label) {
+                <span class="level">{{ level.label }} {{ level.n }} <span class="iqr">({{ level.pct }}%)</span></span>
+              }
+            }
+          </dd>
+        </div>
+      }
+    </dl>
+  </section>
+}

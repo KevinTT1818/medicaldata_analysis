@@ -1,0 +1,61 @@
+<figure>
+  <figcaption>
+    {{ title() }}
+    @if (panel().n_missing > 0) {
+      <span class="missing">缺失 {{ panel().n_missing }}</span>
+    }
+  </figcaption>
+
+  @if (isContinuous()) {
+    <app-echart
+      [option]="histogramOption()"
+      [ariaLabel]="title() + ' 的直方图'"
+      height="240px"
+    />
+    <app-echart
+      [option]="boxOption()"
+      [ariaLabel]="title() + ' 的箱线图，须线为 Tukey 1.5 倍四分位距'"
+      height="210px"
+    />
+    <div class="scroller">
+      <table>
+        <caption class="sr-only">{{ title() }} 的五数概括</caption>
+        <thead>
+          <tr>
+            <th scope="col">分组</th>
+            <th scope="col" class="num">n</th>
+            <th scope="col" class="num">均值 ± SD</th>
+            <th scope="col" class="num">中位数</th>
+            <th scope="col" class="num">IQR</th>
+            <th scope="col" class="num">离群</th>
+          </tr>
+        </thead>
+        <tbody>
+          @for (row of boxRows(); track row.name) {
+            <tr>
+              <th scope="row">
+                <span class="swatch" [style.background]="row.color" aria-hidden="true"></span>{{ row.name }}
+              </th>
+              <td class="num">{{ row.box.n }}</td>
+              <td class="num">
+                {{ row.box.mean.toFixed(2) }}
+                @if (row.box.sd !== null) {
+                  ± {{ row.box.sd.toFixed(2) }}
+                }
+              </td>
+              <td class="num">{{ row.box.median.toFixed(2) }}</td>
+              <td class="num">{{ row.box.q1.toFixed(2) }}–{{ row.box.q3.toFixed(2) }}</td>
+              <td class="num">{{ row.box.outliers.length }}</td>
+            </tr>
+          }
+        </tbody>
+      </table>
+    </div>
+  } @else {
+    <app-echart
+      [option]="categoricalOption()"
+      [ariaLabel]="title() + ' 的构成比条形图'"
+      height="260px"
+    />
+  }
+</figure>

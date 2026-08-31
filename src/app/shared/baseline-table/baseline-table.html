@@ -1,0 +1,96 @@
+@if (result().weighted) {
+  <p class="survey-note">
+    <span class="badge">已加权</span>
+    按复杂抽样权重给出人群估计。Kish 有效样本量
+    <strong>{{ result().effective_n }}</strong>（实际 {{ result().overall_n }} 例）。
+    @if (designNote(); as note) {
+      <span class="design">{{ note }}</span>
+    }
+  </p>
+} @else if (result().weights_available) {
+  <p class="survey-note is-warn">
+    <span class="badge">未加权</span>
+    该数据集带抽样权重但本次未加权，结果只描述样本本身，不能外推到人群。
+  </p>
+}
+
+@if (imputationNote(); as note) {
+  <p class="survey-note is-impute">
+    <span class="badge">已插补</span>{{ note }}
+  </p>
+}
+
+<div class="scroller">
+  <table>
+    <caption class="sr-only">
+      基线特征表，按{{ result().group_by_label ?? '总体' }}分组
+    </caption>
+    <thead>
+      <tr>
+        <th scope="col" class="col-var">变量</th>
+        @for (c of columns(); track c.key) {
+          <th scope="col" class="col-num">
+            {{ c.label }}<span class="n">n = {{ c.n }}</span>
+            @if (c.weightedPct !== null) {
+              <span class="n">人群 {{ c.weightedPct }}%</span>
+            }
+          </th>
+        }
+        <th scope="col" class="col-num">缺失</th>
+        @if (showTests()) {
+          <th scope="col" class="col-num col-p">p</th>
+          <th scope="col" class="col-num col-p">p<sub>校正</sub></th>
+          @if (hasFmi()) {
+            <th scope="col" class="col-num" title="缺失信息占比：该行有多少不确定性来自插补">FMI</th>
+          }
+          <th scope="col">检验方法</th>
+        }
+      </tr>
+    </thead>
+    <tbody>
+      @for (row of result().rows; track row.variable) {
+        <tr class="row-head" [class.is-sig]="isSignificant(row)">
+          <th scope="row">{{ rowLabel(row) }}</th>
+          @for (c of columns(); track c.key) {
+            <td class="col-num">{{ row.kind === 'continuous' ? row.cells[c.key] : '' }}</td>
+          }
+          <td class="col-num" [class.has-missing]="row.n_missing > 0">{{ row.n_missing }}</td>
+          @if (showTests()) {
+            <td class="col-num">{{ formatP(row.p) }}</td>
+            <td class="col-num">{{ formatP(row.p_adj) }}</td>
+            @if (hasFmi()) {
+              <td class="col-num" [class.fmi-high]="(row.fmi ?? 0) > 0.3">{{ formatFmi(row.fmi) }}</td>
+            }
+            <td class="col-test">{{ row.test ?? '—' }}</td>
+          }
+        </tr>
+
+        @for (lv of row.levels ?? []; track lv.label) {
+          <tr class="row-level">
+            <th scope="row">{{ lv.label }}</th>
+            @for (c of columns(); track c.key) {
+              <td class="col-num">{{ lv.cells[c.key] }}</td>
+            }
+            <td></td>
+            @if (showTests()) {
+              <td></td>
+              <td></td>
+              @if (hasFmi()) {
+                <td></td>
+              }
+              <td></td>
+            }
+          </tr>
+        }
+      }
+    </tbody>
+  </table>
+</div>
+
+@if (result().notes.length) {
+  <ul class="notes">
+    @for (note of result().notes; track note) {
+      <li>{{ note }}</li>
+    }
+  </ul>
+}

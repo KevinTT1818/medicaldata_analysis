@@ -1,0 +1,12 @@
+fastapi>=0.141
+uvicorn[standard]>=0.52
+duckdb>=1.5
+polars>=1.44
+pyarrow>=25.0
+numpy>=2.5
+scipy>=1.18
+pydantic>=2.13
+python-docx>=1.2
+lifelines>=0.30
+statsmodels>=0.15
+pandas>=2.3

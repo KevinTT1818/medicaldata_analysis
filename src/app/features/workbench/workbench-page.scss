@@ -1,0 +1,151 @@
+.page-head { margin-bottom: 20px; }
+
+.page-head h1 {
+  font-size: 26px;
+  font-weight: 700;
+  letter-spacing: -0.01em;
+  margin: 0 0 6px;
+}
+
+.page-head p { margin: 0; color: var(--muted); font-size: 14px; }
+
+.config {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: flex-end;
+  gap: 16px;
+  padding: 16px 20px;
+}
+
+.config .field { min-width: 190px; }
+
+.config .run { margin-left: auto; align-self: flex-end; }
+
+.analysis-desc {
+  margin: 12px 2px 0;
+  font-size: 13.5px;
+  color: var(--muted);
+  max-width: 80ch;
+}
+
+.layout {
+  display: grid;
+  grid-template-columns: 340px minmax(0, 1fr);
+  gap: 20px;
+  margin-top: 20px;
+  align-items: start;
+}
+
+@media (max-width: 900px) {
+  .layout { grid-template-columns: 1fr; }
+}
+
+.params {
+  padding: 16px 18px;
+  position: sticky;
+  top: 20px;
+  max-height: calc(100vh - 120px);
+  overflow-y: auto;
+}
+
+.results { min-width: 0; }
+
+.result-panel { padding: 18px 20px; }
+
+.result-head {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 12px;
+  margin-bottom: 14px;
+}
+
+.result-head h2 { font-size: 16px; font-weight: 700; margin: 0; }
+
+.fingerprint { color: var(--muted); }
+
+.empty { padding: 40px 24px; text-align: center; }
+
+.empty p { margin: 0 0 6px; }
+
+.miss-table {
+  border-collapse: collapse;
+  width: 100%;
+  font-size: 13.5px;
+  font-variant-numeric: tabular-nums;
+}
+
+.miss-table th,
+.miss-table td {
+  padding: 8px 14px;
+  text-align: left;
+  border-bottom: 1px solid var(--rule);
+}
+
+.miss-table thead th {
+  font-size: 11px;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: var(--muted);
+  background: var(--surface-2);
+}
+
+.miss-table .num { text-align: right; white-space: nowrap; }
+
+.bar-cell { width: 40%; }
+
+.bar {
+  display: block;
+  height: 8px;
+  min-width: 2px;
+  border-radius: 2px;
+  background: var(--amber);
+}
+
+.miss-summary {
+  margin: 0 0 12px;
+  font-size: 14px;
+  color: var(--ink-2);
+}
+
+.miss-summary strong { font-variant-numeric: tabular-nums; }
+
+.head-meta { display: inline-flex; align-items: baseline; gap: 12px; flex-wrap: wrap; }
+
+.cohort-badge {
+  font-size: 11.5px;
+  font-weight: 600;
+  padding: 2px 8px;
+  border-radius: 2px;
+  background: var(--surface-2);
+  color: var(--muted);
+  border: 1px solid var(--rule);
+}
+
+.cohort-badge.is-filtered {
+  background: var(--accent-wash);
+  color: var(--accent-ink);
+  border-color: var(--accent);
+}
+
+.hidden-note {
+  margin: 0 0 12px;
+  font-size: 12px;
+  color: var(--muted);
+  padding: 6px 10px;
+  background: var(--surface-2);
+  border-radius: var(--radius);
+}
+
+.add-report { font-size: 12px; padding: 3px 10px; font-weight: 500; }
+
+.draft-count {
+  margin-left: 6px;
+  font-size: 10.5px;
+  font-weight: 700;
+  padding: 0 5px;
+  border-radius: 999px;
+  background: var(--accent);
+  color: #fff;
+  font-variant-numeric: tabular-nums;
+}

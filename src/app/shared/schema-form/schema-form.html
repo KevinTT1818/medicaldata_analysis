@@ -1,0 +1,145 @@
+@for (field of primaryFields(); track field.name) {
+  <section class="field-block">
+    <header>
+      <h3>
+        {{ field.title }}
+        @if (field.required) {
+          <span class="req" aria-label="必填">*</span>
+        }
+      </h3>
+      @if (field.kind === 'variables') {
+        <div class="actions">
+          <span class="count">{{ selectedList(field.name).length }} / {{ optionsFor(field).length }}</span>
+          <button class="btn btn-ghost sm" type="button" (click)="selectAll(field)">全选</button>
+          <button class="btn btn-ghost sm" type="button" (click)="clearAll(field.name)">清空</button>
+        </div>
+      }
+    </header>
+
+    @if (field.description) {
+      <p class="hint">{{ field.description }}</p>
+    }
+
+    @if (field.kind === 'variables') {
+      @if (optionsFor(field).length) {
+        <ul class="var-list">
+          @for (v of optionsFor(field); track v.id) {
+            <li>
+              <label class="var" [class.is-on]="isChecked(field.name, v.id)">
+                <input
+                  type="checkbox"
+                  [attr.aria-label]="variableAriaLabel(v)"
+                  [checked]="isChecked(field.name, v.id)"
+                  (change)="toggleVariable(field.name, v.id)"
+                />
+                <span class="var-label">{{ v.label }}</span>
+                <span class="var-meta" aria-hidden="true">
+                  @if (v.n_positive !== null) {
+                    <span class="positive">阳性 {{ v.n_positive }}</span>
+                  }
+                  <span class="kind" [class.kind-continuous]="v.kind === 'continuous'">{{ kindLabel(v) }}</span>
+                  @if (v.n_missing > 0) {
+                    <span class="miss">缺 {{ v.n_missing }}</span>
+                  }
+                </span>
+              </label>
+            </li>
+          }
+        </ul>
+      } @else {
+        <p class="empty-note">该数据集没有符合条件的变量。</p>
+      }
+    } @else {
+      <select
+        class="single"
+        [attr.aria-label]="field.title"
+        [value]="(state()[field.name] ?? '')"
+        (change)="setSingleVariable(field.name, $any($event.target).value)"
+      >
+        @if (!field.required) {
+          <option value="">（不选）</option>
+        } @else if (state()[field.name] === null) {
+          <option value="" disabled>请选择…</option>
+        }
+        @for (v of optionsFor(field); track v.id) {
+          <option [value]="v.id">{{ v.label }}</option>
+        }
+      </select>
+      @if (field.required && !optionsFor(field).length) {
+        <p class="empty-note">该数据集没有符合条件的变量，换个数据集或算子。</p>
+      }
+    }
+  </section>
+}
+
+@if (advancedFields().length) {
+  <section class="advanced">
+    <button
+      class="disclosure"
+      type="button"
+      [attr.aria-expanded]="showAdvanced()"
+      (click)="showAdvanced.set(!showAdvanced())"
+    >
+      <span class="caret" [class.is-open]="showAdvanced()" aria-hidden="true">▸</span>
+      更多参数（{{ advancedFields().length }}）
+    </button>
+
+    @if (showAdvanced()) {
+      <div class="advanced-grid">
+        @for (field of advancedFields(); track field.name) {
+          <div class="field">
+            <label [attr.for]="'f-' + field.name">{{ field.title }}</label>
+
+            @switch (field.kind) {
+              @case ('enum') {
+                <select
+                  [id]="'f-' + field.name"
+                  [value]="state()[field.name]"
+                  (change)="setValue(field.name, $any($event.target).value)"
+                >
+                  @for (opt of field.enumOptions; track opt.value) {
+                    <option [value]="opt.value">{{ opt.label }}</option>
+                  }
+                </select>
+              }
+              @case ('boolean') {
+                <label class="switch">
+                  <input
+                    [id]="'f-' + field.name"
+                    type="checkbox"
+                    [checked]="!!state()[field.name]"
+                    (change)="setValue(field.name, $any($event.target).checked)"
+                  />
+                  <span>{{ state()[field.name] ? '开启' : '关闭' }}</span>
+                </label>
+              }
+              @case ('number') {
+                <input
+                  [id]="'f-' + field.name"
+                  type="number"
+                  [min]="field.min ?? null"
+                  [max]="field.max ?? null"
+                  [step]="field.step ?? 0.01"
+                  [value]="state()[field.name]"
+                  (change)="setNumber(field.name, $any($event.target).value)"
+                />
+              }
+              @default {
+                <input
+                  [id]="'f-' + field.name"
+                  type="text"
+                  [value]="state()[field.name]"
+                  (change)="setValue(field.name, $any($event.target).value)"
+                />
+              }
+            }
+
+            @if (field.description) {
+              <p class="hint">{{ field.description }}</p>
+            }
+          </div>
+        }
+      </div>
+    }
+  </section>
+}
